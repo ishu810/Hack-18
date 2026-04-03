@@ -1,20 +1,23 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import AuthButton from '../components/auth/AuthButton';
 import AuthInput from '../components/auth/AuthInput';
 import AuthLayout from '../components/auth/AuthLayout';
+import { registerUser } from '../api';
 
 const MotionForm = motion.form;
 
 export default function RegisterPage() {
+  const navigate = useNavigate();
   const [form, setForm] = useState({
-    fullName: '',
+    username: '',
     email: '',
     password: '',
     confirmPassword: '',
   });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const updateField = (event) => {
     const { name, value } = event.target;
@@ -23,9 +26,28 @@ export default function RegisterPage() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    setError('');
+
+    if (form.password !== form.confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
     setLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    setLoading(false);
+    try {
+      await registerUser({
+        username: form.username.trim().toLowerCase(),
+        email: form.email,
+        role: 'ranger',
+        password: form.password,
+      });
+
+      navigate('/login');
+    } catch (submitError) {
+      setError(submitError.message || 'Registration failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -48,12 +70,12 @@ export default function RegisterPage() {
         className="space-y-4"
       >
         <AuthInput
-          label="Full Name"
-          name="fullName"
-          value={form.fullName}
+          label="Username"
+          name="username"
+          value={form.username}
           onChange={updateField}
-          autoComplete="name"
-          placeholder="John Doe"
+          autoComplete="username"
+          placeholder="agent_007"
           required
         />
 
@@ -89,6 +111,8 @@ export default function RegisterPage() {
           placeholder="••••••••"
           required
         />
+
+        {error ? <p className="text-sm text-red-300">{error}</p> : null}
 
         <AuthButton label="Create Account" loading={loading} />
       </MotionForm>

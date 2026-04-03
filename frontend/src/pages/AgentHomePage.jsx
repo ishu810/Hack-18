@@ -248,7 +248,7 @@ export default function AgentHomePage() {
     const approvedHistory = [approvedJourney, ...history].slice(0, 12);
     setHistory(approvedHistory);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(approvedHistory));
-    navigate('/mission-summary', { state: { journey: approvedJourney } });
+    navigate('/travel-alerts', { state: { journey: approvedJourney } });
   };
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
@@ -796,6 +796,58 @@ export default function AgentHomePage() {
               </div>
             </div>
 
+            <section className="mt-5 space-y-5 rounded-2xl border border-slate-700/80 bg-slate-950/55 p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Vector</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">
+                    {getPlaceLabel(origin)} to {getPlaceLabel(destination)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Travel Window</p>
+                  <p className="mt-1 text-sm text-slate-200">{result.departureDate || 'N/A'} to {result.comingDate || 'N/A'}</p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Budget Range</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">
+                    ${Number(result.budgetRange?.[0] || 0).toLocaleString()} - ${Number(result.budgetRange?.[1] || 0).toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Distance / Time</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{result.totalDistance} km / {result.estimatedHours} hrs</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Final Route</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {activeRoute.map((place, index) => {
+                    const label = getPlaceLabel(place);
+                    const isStart = index === 0;
+                    const isEnd = index === activeRoute.length - 1;
+
+                    return (
+                      <div
+                        key={`${label}-${index}`}
+                        className="rounded-lg border border-slate-700 bg-slate-950/65 p-3 shadow-[0_10px_24px_rgba(2,6,23,0.24)]"
+                      >
+                        <p className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-400">Stop {index + 1}</p>
+                        <p className="mt-1 text-sm font-semibold text-amber-100">{label || 'Unknown checkpoint'}</p>
+                        <p className="mt-2 text-xs text-slate-300">
+                          {isStart ? 'Origin point' : isEnd ? 'Destination point' : 'Intermediate checkpoint'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
               <button
                 type="button"
@@ -809,7 +861,7 @@ export default function AgentHomePage() {
                 onClick={approveJourney}
                 className="rounded-xl border border-blue-300/35 bg-linear-to-r from-blue-600/90 to-blue-800/90 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110"
               >
-                View Your Plans
+                Proceed to Travel Alerts
               </button>
             </div>
 

@@ -3,6 +3,73 @@ import { User } from "../models/user.model.js";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+const loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    if (!user) {
+      return res.status(401).json({ message: "Invalid email or password" });
+    }
+
+    if (user.provider === "google") {
+      return res.status(400).json({ message: "This account uses Google login" });
+    }
+
+    const isPasswordValid = await user.isPasswordCorrect(password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: "Invalid email or password" });
+    }
+
+    const accessToken = user.generateAccessToken();
+    const refreshToken = user.generateRefreshToken();
+
+    user.refreshToken = refreshToken;
+    await user.save({ validateBeforeSave: false });
+
+    return res
+      .cookie("accessToken", accessToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "Lax",
+        maxAge: 24 * 60 * 60 * 1000,
+      })
+      .cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "Lax",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      })
+      .status(200)
+      .json({
+        message: "Login successful",
+        accessToken,
+        refreshToken,
+        user: {
+          _id: user._id,
+          email: user.email,
+          fullname: user.fullname,
+          username: user.username,
+          avatar: user.avatar,
+          role: user.role,
+          provider: user.provider,
+          isProfileComplete: user.isProfileComplete ?? false,
+        },
+      });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Login failed",
+      error: err.message,
+    });
+  }
+};
+
 const googleLogin = async (req, res) => {
   try {
     console.log("Req body in /google:", req.body);
@@ -122,4 +189,4 @@ const googleLogin = async (req, res) => {
   }
 };
 
-export { googleLogin };
+export { googleLogin, loginUser };
