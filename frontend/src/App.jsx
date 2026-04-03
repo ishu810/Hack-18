@@ -4,6 +4,9 @@ import AgentHomePage from './pages/AgentHomePage';
 import LoginPage from './pages/LoginPage';
 import MissionSummaryPage from './pages/MissionSummaryPage';
 import RegisterPage from './pages/RegisterPage';
+import TravelAlerts from './components/TravelAlerts';
+import WeatherDashboard from './components/WeatherForecast';
+// import weatherDashboard from '.pages/weatherForecast';
 
 export default function App() {
   const location = useLocation();
@@ -15,6 +18,8 @@ export default function App() {
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/agent-home" element={<AgentHomePage />} />
         <Route path="/mission-summary" element={<MissionSummaryPage />} />
+            <Route path="/travel-alerts" element={<TravelAlerts />} />
+                <Route path="/weather-dashboard" element={<WeatherDashboard  />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </AnimatePresence>
