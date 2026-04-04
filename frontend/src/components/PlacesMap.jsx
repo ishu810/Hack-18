@@ -207,9 +207,9 @@ export default function PlacesMap({
   );
 
   const routeInputPoints = useMemo(() => {
-    const source = (routePlaces && routePlaces.length ? routePlaces : validPlaces)
-      .map((place) => toLatLng(place))
-      .filter(Boolean);
+    const preferred = (routePlaces || []).map((place) => toLatLng(place)).filter(Boolean);
+    const fallback = (validPlaces || []).map((place) => toLatLng(place)).filter(Boolean);
+    const source = preferred.length >= 2 ? preferred : fallback;
 
     return dedupeConsecutivePoints(source);
   }, [routePlaces, validPlaces]);

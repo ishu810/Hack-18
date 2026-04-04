@@ -15,6 +15,13 @@ function normalizeName(value = '') {
   return String(value || '').toLowerCase().split(',')[0].trim();
 }
 
+function sameCity(a = '', b = '') {
+  const left = normalizeName(a);
+  const right = normalizeName(b);
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
 function readSnapshot() {
   if (typeof window === 'undefined') return null;
   try {
@@ -126,12 +133,15 @@ export default function ItineraryPlannerPage() {
   const [activeDayIndex, setActiveDayIndex] = useState(0);
   const [focusedPlaceName, setFocusedPlaceName] = useState('');
   const [resolvedRoutePlaces, setResolvedRoutePlaces] = useState([]);
+  const [resolvedDayActivityPlaces, setResolvedDayActivityPlaces] = useState([]);
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
   const [routeError, setRouteError] = useState('');
   const [toast, setToast] = useState(null);
 
   const toastTimerRef = useRef(null);
   const lastRemovedRef = useRef(null);
+  const attemptedCoordinateResolutionRef = useRef(new Set());
+  const dayActivityGeoCacheRef = useRef(new Map());
 
   const showToast = (nextToast) => {
     setToast(nextToast);
@@ -194,7 +204,109 @@ export default function ItineraryPlannerPage() {
 
   const activeDay = days[activeDayIndex] || null;
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveDayActivities = async () => {
+      if (!activeDay) {
+        setResolvedDayActivityPlaces([]);
+        return;
+      }
+
+      const activities = Array.isArray(activeDay.activities) ? activeDay.activities : [];
+      if (!activities.length) {
+        setResolvedDayActivityPlaces([]);
+        return;
+      }
+
+      const bySelected = [];
+      const matchedActivityIndexes = new Set();
+      const usedSelected = new Set();
+
+      activities.forEach((activity, activityIndex) => {
+        const picked = pickPlaceForActivity(activity, selectedPlaces, activeDay.city, usedSelected);
+        if (!picked?.place) return;
+        usedSelected.add(picked.index);
+        matchedActivityIndexes.add(activityIndex);
+        bySelected.push(picked.place);
+      });
+
+      const missingCount = activities.length - bySelected.length;
+      const resolvedMissing = missingCount > 0
+        ? await Promise.all(activities.map(async (activity, index) => {
+          if (matchedActivityIndexes.has(index)) return null;
+
+          const location = activity?.location || activeDay.city || '';
+          const title = activity?.title || `Stop ${index + 1}`;
+
+          const locationMatch = (selectedPlaces || []).find((place) => {
+            const lat = Number(place?.lat);
+            const lng = Number(place?.lng ?? place?.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+            return sameCity(place?.location, location || activeDay.city);
+          });
+
+          if (locationMatch) {
+            return {
+              name: locationMatch.name || title,
+              location: locationMatch.location || location || activeDay.city || '',
+              lat: Number(locationMatch.lat),
+              lng: Number(locationMatch.lng ?? locationMatch.lon),
+            };
+          }
+
+          const query = [location, activeDay.city, title].filter(Boolean).join(', ');
+          const cached = dayActivityGeoCacheRef.current.get(query);
+          if (cached) {
+            return {
+              name: title,
+              location: location || activeDay.city || '',
+              lat: cached.lat,
+              lng: cached.lng,
+            };
+          }
+
+          const geo = await geocodePlace(query);
+          if (!geo || !Number.isFinite(geo.lat) || !Number.isFinite(geo.lng)) return null;
+          dayActivityGeoCacheRef.current.set(query, { lat: Number(geo.lat), lng: Number(geo.lng) });
+
+          return {
+            name: title,
+            location: location || activeDay.city || '',
+            lat: Number(geo.lat),
+            lng: Number(geo.lng),
+          };
+        }))
+        : [];
+
+      if (cancelled) return;
+
+      const merged = [...bySelected, ...(resolvedMissing || []).filter(Boolean)]
+        .filter((place) => Number.isFinite(Number(place?.lat)) && Number.isFinite(Number(place?.lng ?? place?.lon)));
+
+      const deduped = merged.filter((place, index, all) => {
+        const key = `${normalizeName(place?.name)}|${Number(place?.lat).toFixed(5)}|${Number(place?.lng ?? place?.lon).toFixed(5)}`;
+        return all.findIndex((candidate) => {
+          const candidateKey = `${normalizeName(candidate?.name)}|${Number(candidate?.lat).toFixed(5)}|${Number(candidate?.lng ?? candidate?.lon).toFixed(5)}`;
+          return candidateKey === key;
+        }) === index;
+      });
+
+      setResolvedDayActivityPlaces(optimizeDayPlaces(deduped));
+    };
+
+    resolveDayActivities();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDay, selectedPlaces]);
+
   const activeDayRoutePlaces = useMemo(() => {
+    if (resolvedDayActivityPlaces.length > 0) {
+      return optimizeDayPlaces(resolvedDayActivityPlaces);
+    }
+
     if (!activeDay) return [];
 
     const used = new Set();
@@ -207,8 +319,25 @@ export default function ItineraryPlannerPage() {
       })
       .filter(Boolean);
 
-    return optimizeDayPlaces(matched);
-  }, [activeDay, selectedPlaces]);
+    if (matched.length >= 2) {
+      return optimizeDayPlaces(matched);
+    }
+
+    // Fallback: use places from the active day's city so map changes per day even
+    // when activity titles/locations do not exactly match selected place names.
+    const dayCityPlaces = (selectedPlaces || []).filter((place) => {
+      const lat = Number(place?.lat);
+      const lng = Number(place?.lng ?? place?.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+      return sameCity(place?.location, activeDay.city);
+    });
+
+    if (dayCityPlaces.length >= 2) {
+      return optimizeDayPlaces(dayCityPlaces);
+    }
+
+    return optimizeDayPlaces(matched.length ? matched : dayCityPlaces);
+  }, [activeDay, resolvedDayActivityPlaces, selectedPlaces]);
 
   const removeSinglePlaceInstance = (activity, dayCity) => {
     const used = new Set();
@@ -381,7 +510,89 @@ export default function ItineraryPlannerPage() {
 
   const routeCheckpointPlaces = useMemo(() => resolvedRoutePlaces, [resolvedRoutePlaces]);
 
-  const mapPlaces = activeDayMapPlaces.length ? activeDayMapPlaces : routeCheckpointPlaces;
+  useEffect(() => {
+    if (!Array.isArray(selectedPlaces) || selectedPlaces.length === 0) return;
+
+    const pending = selectedPlaces
+      .map((place, index) => ({ place, index }))
+      .filter(({ place }) => {
+        const lat = Number(place?.lat);
+        const lng = Number(place?.lng ?? place?.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) return false;
+
+        const key = `${normalizeName(place?.name)}|${normalizeName(place?.location)}`;
+        return key && !attemptedCoordinateResolutionRef.current.has(key);
+      });
+
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+
+    const resolveMissingCoords = async () => {
+      const updates = await Promise.all(pending.map(async ({ place, index }) => {
+        const key = `${normalizeName(place?.name)}|${normalizeName(place?.location)}`;
+        attemptedCoordinateResolutionRef.current.add(key);
+
+        const byCheckpoint = routeCheckpointPlaces.find((checkpoint) => {
+          const locKey = normalizeName(place?.location);
+          const checkpointKey = normalizeName(checkpoint?.name);
+          return locKey && checkpointKey && locKey === checkpointKey;
+        });
+
+        if (byCheckpoint && Number.isFinite(Number(byCheckpoint.lat)) && Number.isFinite(Number(byCheckpoint.lng))) {
+          return {
+            index,
+            lat: Number(byCheckpoint.lat),
+            lng: Number(byCheckpoint.lng),
+          };
+        }
+
+        const query = [place?.name, place?.location].filter(Boolean).join(', ').trim();
+        const geo = await geocodePlace(query);
+        if (!geo || !Number.isFinite(geo.lat) || !Number.isFinite(geo.lng)) return null;
+
+        return {
+          index,
+          lat: Number(geo.lat),
+          lng: Number(geo.lng),
+        };
+      }));
+
+      if (cancelled) return;
+      const validUpdates = updates.filter(Boolean);
+      if (validUpdates.length === 0) return;
+
+      setSelectedPlaces((prev) => {
+        const next = [...prev];
+        validUpdates.forEach((update) => {
+          const current = next[update.index];
+          if (!current) return;
+          next[update.index] = {
+            ...current,
+            lat: update.lat,
+            lng: update.lng,
+          };
+        });
+        return next;
+      });
+    };
+
+    resolveMissingCoords();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [routeCheckpointPlaces, selectedPlaces]);
+
+  const mapPlaces = useMemo(() => {
+    const withCoords = (activeDayMapPlaces || []).filter((place) => {
+      const lat = Number(place?.lat);
+      const lng = Number(place?.lng ?? place?.lon);
+      return Number.isFinite(lat) && Number.isFinite(lng);
+    });
+
+    return withCoords.length ? withCoords : routeCheckpointPlaces;
+  }, [activeDayMapPlaces, routeCheckpointPlaces]);
   const activeDayPlaceNames = activeDayRoutePlaces.map((place) => place?.name).filter(Boolean);
 
   if (!journey || !itineraryBundle) {
