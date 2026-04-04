@@ -12,20 +12,8 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({extended:true}));
 app.use(express.static("public"));
-const allowedOrigins = new Set([
-  process.env.CORS_ORIGIN || 'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:5174'
-]);
 app.use(cors({
-    origin: (origin, callback) => {
-        if (!origin) return callback(null, true); // allow non-browser requests like curl/postman
-    if (allowedOrigins.has(origin)) return callback(null, true);
-    if (/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) return callback(null, true);
-        return callback(new Error(`CORS Policy: origin ${origin} not allowed`), false);
-    },
+    origin:process.env.CORS_ORIGIN,
     credentials: true,
 }));
 
@@ -33,7 +21,6 @@ app.use(cors({
 
 import userAuthRouter from "./routes/auth.route.js"
 import userRouter from "./routes/user.route.js"
-import travelRouter from "./routes/travel.route.js"
 
 
 
@@ -42,7 +29,6 @@ import travelRouter from "./routes/travel.route.js"
 
 app.use("/api/auth",userAuthRouter)
 app.use("/api/user",userRouter)
-app.use("/api/travel", travelRouter)
 
 
 
