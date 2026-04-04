@@ -14,7 +14,9 @@ app.use(cors({
 }));
 
 import userRouter from "./routes/user.route.js"
+import authRouter from "./routes/auth.route.js"
 
+app.use("/api/auth",authRouter)
 app.use("/api/user",userRouter)
 
 app.get("/",(req,res)=>{
