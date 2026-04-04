@@ -838,7 +838,7 @@ const normalizeItineraryForSave = (rawData) => {
 
 const createTrip = asyncHandler(async (req, res) => {
   const { origin, destination, stops, budget, dates } = req.body;
-  const userId = req.user?._id || null; 
+  const userId = req.user?._id || null;
 
   const trip = await Travel.create({
     user: userId,
@@ -1044,13 +1044,13 @@ const generatePlaces = asyncHandler(async (req, res) => {
     }
 
     const queryVariants = buildQueryVariants(place.name, place.location, place.type);
-    
+
     // Try Unsplash first
     if (!isProbablyValidUrl(url)) {
       url = await getUnsplashImage(queryVariants, place.name);
       if (url && !(await isReachableImageUrl(url))) url = '';
     }
-    
+
     // If Unsplash fails, try Pexels
     if (!isProbablyValidUrl(url)) {
       url = await getPexelsImage(queryVariants, place.name);
@@ -1169,8 +1169,8 @@ const generateItinerary = asyncHandler(async (req, res) => {
       candidatePlacesCount: trip.candidatePlaces?.length
     });
     console.log('================================================\n');
-    return res.status(400).json({ 
-      success: false, 
+    return res.status(400).json({
+      success: false,
       message: `Places not selected yet. Current status: ${trip.status}`,
       tripStatus: trip.status,
       selectedPlaces: trip.selectedPlaces?.length
@@ -1198,17 +1198,17 @@ const generateItinerary = asyncHandler(async (req, res) => {
     console.log('🔄 Calling LLM...');
     const response = await llm.invoke(prompt);
     const content = response.content || response.text || '{}';
-    
+
     console.log('✅ LLM response received, length:', content.length);
     console.log('📝 Response preview:', content.substring(0, 200));
-    
+
     itineraryData = JSON.parse(content);
     console.log('✅ Response parsed successfully');
     console.log('📊 Itinerary days:', itineraryData.itinerary?.length);
   } catch (error) {
     console.warn('⚠️ LLM generation failed:', error.message);
     console.log('📝 Using fallback itinerary...');
-    
+
     // Generate simple fallback itinerary
     itineraryData = {
       itinerary: groupedPlan.groupedPlacesByDay.map((dayPlaces, index) => {
@@ -1256,7 +1256,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
             mode: 'car',
             note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`,
           } : null,
-          food: [
+          food: [ 
             {
               meal: 'Lunch',
               place: `Local restaurant in ${currentCity}`,
@@ -1307,7 +1307,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
     trip.itinerary = normalizedItinerary;
     trip.status = 'itinerary_generated';
     const savedTrip = await trip.save();
-    
+
     console.log('✅ Trip saved successfully');
     console.log('📊 Final trip status:', savedTrip.status);
     console.log('================================================\n');
@@ -1320,10 +1320,10 @@ const generateItinerary = asyncHandler(async (req, res) => {
     console.error('❌ Error saving trip:', error.message);
     console.error('Stack:', error.stack);
     console.log('================================================\n');
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to save itinerary', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to save itinerary',
+      error: error.message
     });
   }
 });

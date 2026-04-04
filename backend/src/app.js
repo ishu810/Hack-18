@@ -34,7 +34,7 @@ app.use(cors({
 import userAuthRouter from "./routes/auth.route.js"
 import userRouter from "./routes/user.route.js"
 import travelRouter from "./routes/travel.route.js"
-
+import history from "./routes/trip.route.js"
 
 
 
@@ -43,6 +43,7 @@ import travelRouter from "./routes/travel.route.js"
 app.use("/api/auth",userAuthRouter)
 app.use("/api/user",userRouter)
 app.use("/api/travel", travelRouter)
+app.use("/api", history)
 
 
 

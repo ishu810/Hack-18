@@ -22,7 +22,7 @@ const tripSchema = new mongoose.Schema({
     required: true
   },
   dates: [{
-    type: String // e.g., "2026-05-10"
+    type: String 
   }],
 candidatePlaces: [{
   name: { type: String, default: '' },
@@ -55,6 +55,19 @@ candidatePlaces: [{
     type: Date,
     default: Date.now
   }
+});
+tripSchema.pre('save', function(next) {
+  const budget = this.estimatedBudget;
+  
+  if (budget) {
+    this.estimatedBudget.total = 
+      (budget.accommodation || 0) + 
+      (budget.food || 0) + 
+      (budget.transport || 0) + 
+      (budget.activities || 0);
+  }
+
+  next();
 });
 
 export const Trip = mongoose.model('Trip', tripSchema);
