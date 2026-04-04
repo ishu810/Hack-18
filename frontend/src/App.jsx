@@ -13,7 +13,9 @@ export default function App() {
       <Routes location={location} key={location.pathname}>
         <Route path="/login" element={<AgentHomePage />} />
         <Route path="/register" element={<RegisterPage />} />
-       
+        <Route path="/agent-home" element={<AgentHomePage />} />
+        <Route path="/mission-summary" element={<MissionSummaryPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </AnimatePresence>
   );
