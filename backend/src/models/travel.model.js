@@ -122,6 +122,10 @@ const travelSchema = new mongoose.Schema({
     type: String,
     required: true
   }],
+  stayPreferences: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {},
+  },
   candidatePlaces: [{
     name: { type: String, default: '' },
     type: { type: String, default: 'unknown' },

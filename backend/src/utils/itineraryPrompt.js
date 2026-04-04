@@ -17,6 +17,13 @@ export const buildItineraryPrompt = ({
     })
     .join('\n');
 
+  const dayCityPlanText = (groupedPlacesByDay || [])
+    .map((dayPlaces, index) => {
+      const city = (dayPlaces?.[0]?.location || destination || '').trim() || 'Unknown city';
+      return `Day ${index + 1} city: ${city}`;
+    })
+    .join('\n');
+
   const weatherByDayText = (weatherByDay || [])
     .map((entry, index) => {
       if (!entry) return `Day ${index + 1}: Weather unavailable`;
@@ -43,6 +50,9 @@ CRITICAL INSTRUCTION: YOU MUST DISTRIBUTE ALL ${totalPlaces} SELECTED PLACES acr
 WEATHER INPUT YOU MUST USE (DO NOT INVENT OR REPLACE THESE VALUES):
 ${weatherByDayText}
 
+FIXED DAY CITY PLAN (DO NOT CHANGE ORDER):
+${dayCityPlanText}
+
 MANDATORY NEARBY GROUPING (DO NOT VIOLATE):
 ${groupedByDayText}
 
@@ -51,12 +61,13 @@ GROUPING RULES:
 - Do not move a day-1 place to day-2 or vice versa.
 - Places listed under the same day are geographically close and should stay together.
 - Avoid mixing very far places in the same day.
+- Day numbering and city sequence are fixed by the day city plan above.
 
 INSTRUCTIONS (Be CONCISE to minimize tokens - use bullet points, short descriptions):
 Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, include:
 
 1. Day number, city/area, and a short theme (e.g., "Nature & Culture")
-2. Weather: expected condition (e.g., "Clear", "Rainy") - be realistic
+2. Weather: use the provided day-wise weather input
 3. Activities: Include up to ${activitiesPerDay} activities (hard max 3 per day) with format: "Time: Activity Title | Duration: X min | Type: outdoor/indoor"
 4. Travel: if moving between places, include "From→To | Duration | Transport | Note"
 5. Intra-day transit: explicitly account for travel time between consecutive activities (A->B, B->C)
@@ -85,36 +96,19 @@ IMPORTANT:
 - Use simple, readable format.
 - Keep each field brief to save tokens.
 - Distribute selected places across days reasonably.
-- For EACH day, weather and weather_note MUST reflect the weather input for that day.
-- For EACH activity description, explain in human tone why that place fits the day's weather using a simple practical reason.
-- Do not use generic weather statements like "good weather".
-- Write weather_note as a well-thought daily advisory in natural human tone (4 to 6 short sentences, roughly 70 to 120 words).
-- weather_note must include:
-  1) a plain-language weather summary,
-  2) practical planning advice (timing, pace, hydration, clothing, umbrellas/sun protection),
-  3) one caution if relevant (rain, heat, wind, alert).
-- Keep the advisory balanced: informative, calm, and actionable (not alarmist).
-- Do NOT repeat the same raw weather fields in weather_note that are already shown in the UI; focus on what the traveler should do differently today.
-- Avoid listing numbers unless they are genuinely important to the advice.
-- Favor advice phrases like "start early", "carry a light layer", "keep indoor options ready", "plan the longer stop first", or "take water breaks".
-- Make the advisory sound like a knowledgeable travel planner speaking to a traveler.
-- Prefer guidance such as when to go out, which parts of the day are easier, whether to slow down or keep a backup plan, and how to dress or pack.
-- Avoid phrases like "the forecast shows" or "weather data indicates"; sound natural and direct.
-- If conditions are pleasant, explain how to take advantage of them rather than repeating the conditions.
-- If conditions are less ideal, be calm and practical, not dramatic.
-- Include one sentence that tells the traveler how to structure the day better because of the weather.
-- Include one sentence that recommends the best time window for the main outdoor stop.
-- Include one sentence that adds a small practical tip people would actually use.
-- Aim for a compact advisory arc: 1) what today feels like, 2) what to do first, 3) what to avoid or delay, 4) a useful packing or pacing tip, 5) a brief final reassurance.
-- Keep the content advice-heavy and avoid turning the note into a weather report.
-- The note should feel like a short actionable briefing, not a list of measurements.
+- For each day, weather and weather_note must match that day's weather input.
+- Keep activity description short (one line).
+- Write weather_note in 2 to 4 short sentences with practical advice.
+
+RESPONSE FORMAT (STRICT JSON):
+{
   "itinerary": [
     {
       "day": 1,
       "city": "City Name",
       "theme": "Theme/Category",
       "weather": "Clear/Rainy/Cloudy",
-      "weather_note": "4-6 sentence human advisory focused on advice, not metric repetition",
+      "weather_note": "Short practical advisory",
       "weather_details": {
         "date": "YYYY-MM-DD",
         "condition": "Partly cloudy",
@@ -135,7 +129,7 @@ IMPORTANT:
           "title": "Activity Name",
           "time": "9:00 AM - 11:00 AM",
           "duration_min": 120,
-          "description": "Human-like explanation including weather-fit with numeric data",
+          "description": "Short one-line reason to visit",
           "type": "outdoor/indoor",
           "location": "Specific area"
         }

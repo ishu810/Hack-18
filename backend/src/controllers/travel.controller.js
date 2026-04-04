@@ -19,6 +19,88 @@ const getWeatherApiKey = () => {
   return raw.trim();
 };
 
+const KIWI_CITY_IATA = {
+  delhi: 'DEL',
+  mumbai: 'BOM',
+  bengaluru: 'BLR',
+  bangalore: 'BLR',
+  hyderabad: 'HYD',
+  chennai: 'MAA',
+  kolkata: 'CCU',
+  pune: 'PNQ',
+  ahmedabad: 'AMD',
+  jaipur: 'JAI',
+  lucknow: 'LKO',
+  agra: 'AGR',
+  mathura: 'DEL',
+  udaipur: 'UDR',
+  varanasi: 'VNS',
+  goa: 'GOI',
+  kochi: 'COK',
+  kochin: 'COK',
+  chandigarh: 'IXC',
+  indore: 'IDR',
+  nagpur: 'NAG',
+  surat: 'STV',
+  bhopal: 'BHO',
+  patna: 'PAT',
+  ranchi: 'IXR',
+  amritsar: 'ATQ',
+  dehradun: 'DED',
+  srinagar: 'SXR',
+  guwahati: 'GAU',
+  bhubaneswar: 'BBI',
+  trivandrum: 'TRV',
+  visakhapatnam: 'VTZ',
+  mysore: 'MYQ',
+};
+
+const normalizeCityToken = (value = '') => String(value || '')
+  .toLowerCase()
+  .replace(/[^a-z\s]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const resolveIataForCity = (value = '') => {
+  const normalized = normalizeCityToken(value);
+  if (!normalized) return '';
+
+  if (KIWI_CITY_IATA[normalized]) return KIWI_CITY_IATA[normalized];
+
+  const parts = normalized.split(' ').filter(Boolean);
+  for (const part of parts) {
+    if (KIWI_CITY_IATA[part]) return KIWI_CITY_IATA[part];
+  }
+
+  return '';
+};
+
+const extractKiwiItinerarySummary = (payload = {}) => {
+  const itineraries = Array.isArray(payload?.itineraries) ? payload.itineraries : [];
+  if (!itineraries.length) return null;
+
+  const normalizePrice = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount > 0 ? amount : null;
+  };
+
+  const durationMinutesFromSeconds = (value) => {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : null;
+  };
+
+  const ranked = itineraries
+    .map((itinerary) => {
+      const price = normalizePrice(itinerary?.price?.amount ?? itinerary?.priceEur?.amount);
+      const duration = durationMinutesFromSeconds(itinerary?.outbound?.duration ?? itinerary?.duration ?? itinerary?.outbound?.durationInMinutes);
+      return price ? { price, duration } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.price - right.price);
+
+  return ranked[0] || null;
+};
+
 const maskKey = (value = '') => {
   const key = String(value || '').trim();
   if (!key) return '[missing]';
@@ -123,7 +205,47 @@ const getFallbackWeatherReason = (place, details = {}) => {
   const rain = Number.isFinite(details.daily_chance_of_rain) ? `${details.daily_chance_of_rain}%` : 'unknown';
   const avg = Number.isFinite(details.avg_temp_c) ? `${details.avg_temp_c}C` : 'unknown';
   const wind = Number.isFinite(details.max_wind_kph) ? `${details.max_wind_kph} kph` : 'unknown';
-  return `${placeName} is a smart pick today because the forecast shows ${condition} with around ${avg} average temperature, ${rain} rain chance, and winds near ${wind}, making this stop practical and comfortable in the expected conditions.`;
+  return `${placeName}: Good pick for today (${condition}, avg ${avg}, rain ${rain}, wind ${wind}).`;
+};
+
+const getGenericPlaceReason = (place, activity = {}, fallbackCity = '') => {
+  const cleanActivityLabel = (value = '') => String(value || '')
+    .replace(/\|\s*duration\s*:[^|]*/gi, '')
+    .replace(/\|\s*type\s*:[^|]*/gi, '')
+    .replace(/^\s*after\s+reaching\s+[^,]+,\s*/i, '')
+    .replace(/^\s*\d{1,2}:\d{2}\s*(?:am|pm)?\s*-\s*/i, '')
+    .replace(/^\s*(morning\s+visit\s+to|evening\s+visit\s+to|visit|explore|discover|tour|boat\s+ride\s+on|walk\s+through|lunch\s+at|dinner\s+at)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const placeName = cleanActivityLabel(place?.name || activity?.title || 'This place') || 'This place';
+  const city = String(place?.location || activity?.location || fallbackCity || '').trim();
+  const key = normalizePlaceName(placeName);
+
+  if (key.includes('taj mahal')) {
+    return 'Famous for its white-marble Mughal architecture and symmetry; expect iconic views and moderate crowds.';
+  }
+  if (key.includes('agra fort')) {
+    return 'Known for grand Mughal courtyards and history-rich interiors; expect a rewarding heritage walk.';
+  }
+  if (key.includes('city palace')) {
+    return 'A heritage landmark known for royal architecture, museum spaces, and panoramic old-city views.';
+  }
+  if (key.includes('jagdish temple')) {
+    return 'A well-known historic temple admired for intricate carvings and a vibrant local spiritual atmosphere.';
+  }
+  if (key.includes('lake pichola') || key.includes('pichola')) {
+    return 'Famous for calm waters, palace backdrops, and scenic sunset views; expect a relaxed, photogenic stop.';
+  }
+  if (key.includes('mathura')) {
+    return 'Popular for Krishna heritage and lively local culture; expect temples, local markets, and devotional charm.';
+  }
+
+  if (city) {
+    return `${placeName} is a well-known highlight in ${city}, popular for local character, memorable views, and cultural value.`;
+  }
+
+  return `${placeName} is a popular highlight known for its atmosphere, local significance, and visitor-friendly experience.`;
 };
 
 const fetchWeatherForCity = async ({ city, tripDays }) => {
@@ -217,6 +339,23 @@ const getTripDaysFromDates = (dates) => {
   return Math.max(1, diffDays);
 };
 
+const buildRouteCitySequence = (trip = {}) => {
+  const raw = [...(Array.isArray(trip?.stops) ? trip.stops : []), trip?.destination]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+  const seen = new Set();
+  const sequence = [];
+  raw.forEach((city) => {
+    const key = normalizePlaceName(city);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    sequence.push(city);
+  });
+
+  return sequence;
+};
+
 const normalizePlaceName = (value = '') => value
   .toLowerCase()
   .replace(/[^a-z0-9\s]/g, ' ')
@@ -241,7 +380,7 @@ const distanceKm = (a, b) => {
   return 6371 * 2 * Math.atan2(Math.sqrt(val), Math.sqrt(1 - val));
 };
 
-const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
+const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1, routeOrderedCities = []) => {
   const days = Math.max(1, Number(tripDays) || 1);
   const cleanedPlaces = (Array.isArray(selectedPlaces) ? selectedPlaces : [])
     .filter((place) => place && place.name)
@@ -268,8 +407,37 @@ const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
   });
 
   const locationGroups = [...byLocation.values()].sort((a, b) => b.length - a.length);
+  const groupedKeys = new Set();
+
+  // Keep itinerary progression aligned with route order (stops -> destination).
+  const orderedCityKeys = (Array.isArray(routeOrderedCities) ? routeOrderedCities : [])
+    .map((city) => normalizePlaceName(city))
+    .filter(Boolean);
+
+  orderedCityKeys.forEach((cityKey, index) => {
+    if (!cityKey) return;
+    const exactGroup = byLocation.get(cityKey);
+    let resolvedGroup = exactGroup;
+
+    if (!resolvedGroup) {
+      const fuzzyMatch = [...byLocation.entries()].find(([locKey]) => locKey.includes(cityKey) || cityKey.includes(locKey));
+      resolvedGroup = fuzzyMatch?.[1] || null;
+    }
+
+    if (!resolvedGroup?.length) return;
+
+    const resolvedKey = normalizePlaceName(resolvedGroup[0]?.location || cityKey);
+    if (groupedKeys.has(resolvedKey)) return;
+    groupedKeys.add(resolvedKey);
+
+    const targetDay = Math.min(index, days - 1);
+    groupedPlacesByDay[targetDay].push(...resolvedGroup);
+  });
 
   locationGroups.forEach((group) => {
+    const key = normalizePlaceName(group?.[0]?.location || '');
+    if (key && groupedKeys.has(key)) return;
+
     let targetDay = 0;
     for (let index = 1; index < groupedPlacesByDay.length; index += 1) {
       if (groupedPlacesByDay[index].length < groupedPlacesByDay[targetDay].length) {
@@ -1193,14 +1361,10 @@ const applyWeatherToItineraryData = ({ normalizedItinerary, weatherByDay = [], g
 
       const dayPlaces = groupedPlacesByDay[index] || [];
       const activities = (day.activities || []).map((activity, activityIndex) => {
-        const existingDescription = (activity?.description || '').trim();
-        const hasNumericWeatherEvidence = /\d+\s?(?:%|mm|kph|c|C|km|uv)/.test(existingDescription);
-        if (hasNumericWeatherEvidence) return activity;
-
         const fallbackPlace = dayPlaces[activityIndex] || dayPlaces[0] || null;
         return {
           ...activity,
-          description: getFallbackWeatherReason(fallbackPlace || { name: activity?.title }, mergedDetails)
+          description: getGenericPlaceReason(fallbackPlace, activity, day.city || details.city || '')
         };
       });
 
@@ -1218,8 +1382,134 @@ const applyWeatherToItineraryData = ({ normalizedItinerary, weatherByDay = [], g
   return next;
 };
 
+const realignItineraryToPlannedDays = ({ normalizedItinerary, groupedPlacesByDay = [], destination = '' }) => {
+  const sourceDays = [...(normalizedItinerary?.itinerary || [])];
+  const targetCities = groupedPlacesByDay.map((dayPlaces) => String(dayPlaces?.[0]?.location || destination || '').trim());
+
+  const alignedDays = targetCities.map((targetCity, index) => {
+    const targetKey = normalizePlaceName(targetCity);
+    let matchIndex = sourceDays.findIndex((day) => normalizePlaceName(day?.city) === targetKey);
+
+    if (matchIndex === -1 && targetKey) {
+      matchIndex = sourceDays.findIndex((day) => {
+        const dayKey = normalizePlaceName(day?.city || '');
+        return dayKey && (dayKey.includes(targetKey) || targetKey.includes(dayKey));
+      });
+    }
+
+    if (matchIndex === -1) matchIndex = 0;
+    const pickedDay = matchIndex >= 0 ? sourceDays.splice(matchIndex, 1)[0] : null;
+
+    return {
+      ...(pickedDay || {}),
+      day: index + 1,
+      city: targetCity || pickedDay?.city || destination || ''
+    };
+  });
+
+  // If model returned extra days, append safely while preserving order.
+  sourceDays.forEach((day) => {
+    alignedDays.push({
+      ...day,
+      day: alignedDays.length + 1,
+    });
+  });
+
+  return {
+    ...normalizedItinerary,
+    itinerary: alignedDays,
+  };
+};
+
+const buildDurationLabelFromDistance = (km) => {
+  const safeKm = Number.isFinite(km) ? km : 0;
+  if (safeKm <= 0) return 'Approx 3-6 hours';
+  const hours = Math.max(1, Math.round((safeKm / 45) * 10) / 10);
+  return `${hours} hours (~${Math.max(1, Math.round(safeKm))} km)`;
+};
+
+const ensureInterCityTransitData = async ({ itineraryBundle, origin = '' }) => {
+  const days = Array.isArray(itineraryBundle?.itinerary) ? itineraryBundle.itinerary : [];
+  if (!days.length) return itineraryBundle;
+
+  const centerCache = new Map();
+  const getCenter = async (city) => {
+    const key = normalizePlaceName(city || '');
+    if (!key) return null;
+    if (centerCache.has(key)) return centerCache.get(key);
+    const center = await geocodeWithGeoapify(city);
+    centerCache.set(key, center || null);
+    return center || null;
+  };
+
+  const nextDays = [];
+  for (let index = 0; index < days.length; index += 1) {
+    const day = days[index] || {};
+    const currentCity = String(day.city || day?.activities?.[0]?.location || '').trim();
+    const previousCity = String(index === 0 ? origin : (nextDays[index - 1]?.city || days[index - 1]?.city || origin)).trim();
+
+    const isTransferDay = Boolean(currentCity && previousCity && normalizePlaceName(currentCity) !== normalizePlaceName(previousCity));
+    const activities = Array.isArray(day.activities) ? [...day.activities] : [];
+
+    if (isTransferDay && activities.length) {
+      const firstTitle = String(activities[0]?.title || '').trim();
+      if (firstTitle && !/^after\s+reaching\s+/i.test(firstTitle)) {
+        activities[0] = {
+          ...activities[0],
+          title: `After reaching ${currentCity}, ${firstTitle.charAt(0).toLowerCase()}${firstTitle.slice(1)}`
+        };
+      }
+    }
+
+    if (!isTransferDay) {
+      nextDays.push({
+        ...day,
+        travel: null,
+        activities,
+      });
+      continue;
+    }
+
+    const currentTravel = day.travel || {};
+    const fromCity = String(currentTravel.from || previousCity || '').trim();
+    const toCity = String(currentTravel.to || currentCity || '').trim();
+
+    let durationLabel = String(currentTravel.duration || '').trim();
+    let note = String(currentTravel.note || '').trim();
+
+    if (!durationLabel || !note) {
+      const [fromCenter, toCenter] = await Promise.all([getCenter(fromCity), getCenter(toCity)]);
+      if (fromCenter && toCenter && Number.isFinite(fromCenter.lat) && Number.isFinite(fromCenter.lng) && Number.isFinite(toCenter.lat) && Number.isFinite(toCenter.lng)) {
+        const km = distanceKm({ lat: Number(fromCenter.lat), lng: Number(fromCenter.lng) }, { lat: Number(toCenter.lat), lng: Number(toCenter.lng) });
+        if (!durationLabel) durationLabel = buildDurationLabelFromDistance(km);
+        if (!note) note = `Inter-city transfer of about ${Math.max(1, Math.round(km))} km before sightseeing.`;
+      }
+    }
+
+    if (!durationLabel) durationLabel = 'Approx 3-6 hours';
+    if (!note) note = `Travel from ${fromCity} to ${toCity} before activities.`;
+
+    nextDays.push({
+      ...day,
+      activities,
+      travel: {
+        from: fromCity,
+        to: toCity,
+        mode: String(currentTravel.mode || 'car'),
+        duration: durationLabel,
+        note,
+      }
+    });
+  }
+
+  return {
+    ...itineraryBundle,
+    itinerary: nextDays,
+  };
+};
+
 const createTrip = asyncHandler(async (req, res) => {
-  const { origin, destination, stops, budget, dates } = req.body;
+  const { origin, destination, stops, budget, dates, stayPreferences } = req.body;
   const userId = req.user?._id || null; 
 
   const trip = await Travel.create({
@@ -1228,7 +1518,8 @@ const createTrip = asyncHandler(async (req, res) => {
     destination,
     stops: stops || [],
     budget,
-    dates
+    dates,
+    stayPreferences: stayPreferences || {},
   });
 
   res.status(201).json({
@@ -1561,7 +1852,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
 
   console.log('✅ Trip status is valid (places_selected)');
   const tripDays = getTripDaysFromDates(trip.dates);
-  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays);
+  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays, buildRouteCitySequence(trip));
   const weatherByDay = await buildWeatherByDayInput({
     groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
     tripDates: trip.dates,
@@ -1709,14 +2000,23 @@ const generateItinerary = asyncHandler(async (req, res) => {
 
   try {
     const normalizedItinerary = normalizeItineraryForSave(itineraryData);
-    const weatherAwareItinerary = applyWeatherToItineraryData({
+    const dayAlignedItinerary = realignItineraryToPlannedDays({
       normalizedItinerary,
+      groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
+      destination: trip.destination,
+    });
+    const weatherAwareItinerary = applyWeatherToItineraryData({
+      normalizedItinerary: dayAlignedItinerary,
       weatherByDay,
       groupedPlacesByDay: groupedPlan.groupedPlacesByDay
     });
-    console.log('✅ Normalized itinerary days:', weatherAwareItinerary.itinerary.length);
+    const transitAwareItinerary = await ensureInterCityTransitData({
+      itineraryBundle: weatherAwareItinerary,
+      origin: trip.origin,
+    });
+    console.log('✅ Normalized itinerary days:', transitAwareItinerary.itinerary.length);
 
-    trip.itinerary = weatherAwareItinerary;
+    trip.itinerary = transitAwareItinerary;
     trip.status = 'itinerary_generated';
     const savedTrip = await trip.save();
     
@@ -1762,10 +2062,241 @@ const computeRoute = asyncHandler(async (req, res) => {
   });
 });
 
+const getFlightCost = asyncHandler(async (req, res) => {
+  const from = String(req.body?.from || '').trim();
+  const to = String(req.body?.to || '').trim();
+
+  if (!from || !to) {
+    return res.status(200).json({ success: true, minFare: null, fallback: true });
+  }
+
+  const fromCode = resolveIataForCity(from) || null;
+  const toCode = resolveIataForCity(to) || null;
+
+  if (!fromCode || !toCode) {
+    return res.status(200).json({ success: true, minFare: null, fallback: true });
+  }
+
+  const rapidApiKey = String(process.env.RAPIDAPI_KEY || process.env.KIWI_RAPIDAPI_KEY || '').trim();
+  const rapidApiHost = 'kiwi-com-cheap-flights.p.rapidapi.com';
+
+  if (!rapidApiKey) {
+    return res.status(200).json({ success: true, minFare: null, fallback: true });
+  }
+
+  try {
+    const response = await axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip', {
+      params: {
+        source: fromCode,
+        destination: toCode,
+        currency: 'INR',
+        adults: 1,
+      },
+      headers: {
+        'X-RapidAPI-Key': rapidApiKey,
+        'X-RapidAPI-Host': rapidApiHost,
+      },
+      timeout: 15000,
+    });
+
+    const summary = extractKiwiItinerarySummary(response.data);
+    const minFare = summary?.price ? Math.round(summary.price / 2) : null;
+    const oneWayMinutes = summary?.duration || null;
+
+    return res.status(200).json({
+      success: true,
+      minFare,
+      oneWayMinutes,
+      currency: 'INR',
+      fallback: minFare === null,
+    });
+  } catch (error) {
+    return res.status(200).json({ success: true, minFare: null, fallback: true });
+  }
+});
+
+const estimateBudget = asyncHandler(async (req, res) => {
+  const { tripId } = req.params;
+  const trip = await Travel.findById(tripId);
+
+  if (!trip) {
+    return res.status(404).json({ success: false, message: 'Trip not found' });
+  }
+
+  const days = getTripDaysFromDates(trip.dates);
+  const itineraryDays = Array.isArray(trip?.itinerary?.itinerary)
+    ? trip.itinerary.itinerary
+    : Array.isArray(trip?.itinerary)
+      ? trip.itinerary
+      : [];
+
+  const segmentModes = asObject(req.body?.segmentModes)
+    || asObject(trip?.stayPreferences?.segmentModes)
+    || asObject(trip?.segmentModes)
+    || {};
+
+  function estimateHotelCost(priceLevel, type) {
+    const ranges = {
+      0: [800, 1800],
+      1: [600, 1200],
+      2: [1200, 2800],
+      3: [2800, 5500],
+      4: [5500, 15000],
+    };
+    const r = ranges[Number(priceLevel)] || ranges[0];
+    return { low: r[0], high: r[1], mid: Math.round((r[0] + r[1]) / 2) };
+  }
+
+  function estimateFoodCost(totalBudget, totalDays) {
+    const daily = Math.round(Number(totalBudget || 0) / Math.max(1, totalDays));
+    const food = Math.round(daily * 0.2);
+    return Math.min(2500, Math.max(400, food));
+  }
+
+  function estimateActivitiesCost(activities) {
+    return (Array.isArray(activities) ? activities.length : 0) * 300;
+  }
+
+  const normalizeBudgetKey = (value = '') => String(value || '').toLowerCase().trim();
+  const findTransportForDay = (travel = {}) => {
+    const from = normalizeBudgetKey(travel?.from);
+    const to = normalizeBudgetKey(travel?.to);
+    const directKey = `${from}|${to}`;
+    const reverseKey = `${to}|${from}`;
+    const exact = segmentModes[directKey] || segmentModes[reverseKey] || null;
+    if (exact) return exact;
+
+    const fuzzy = Object.entries(segmentModes).find(([key]) => {
+      const [left, right] = String(key || '').split('|').map(normalizeBudgetKey);
+      return (left && right) && ((left.includes(from) || from.includes(left)) && (right.includes(to) || to.includes(right)));
+    });
+
+    return fuzzy?.[1] || null;
+  };
+
+  const estimateCabTransitCost = async (travel = {}) => {
+    const from = String(travel?.from || '').trim();
+    const to = String(travel?.to || '').trim();
+    if (!from || !to) return { cost: 0, note: 'Transit cost unavailable' };
+
+    const [fromCenter, toCenter] = await Promise.all([geocodeWithGeoapify(from), geocodeWithGeoapify(to)]);
+    if (!fromCenter || !toCenter || !Number.isFinite(fromCenter.lat) || !Number.isFinite(fromCenter.lng) || !Number.isFinite(toCenter.lat) || !Number.isFinite(toCenter.lng)) {
+      return {
+        cost: Math.max(300, Math.round((String(from).length + String(to).length) * 25)),
+        note: `Rough cab estimate for ${from} to ${to}`,
+      };
+    }
+
+    const km = distanceKm({ lat: Number(fromCenter.lat), lng: Number(fromCenter.lng) }, { lat: Number(toCenter.lat), lng: Number(toCenter.lng) });
+    const cost = Math.max(250, Math.round(150 + (km * 13)));
+    return {
+      cost,
+      note: `Approx cab/taxi transfer of ${Math.max(1, Math.round(km))} km`,
+    };
+  };
+
+  const perDay = [];
+  for (let index = 0; index < itineraryDays.length; index += 1) {
+    const day = itineraryDays[index];
+    const hotel = estimateHotelCost(day?.stay?.price_level, day?.stay?.type);
+    const food = estimateFoodCost(trip.budget, days);
+    const activities = estimateActivitiesCost(day?.activities);
+    const transportMode = findTransportForDay(day?.travel);
+    const fallbackTransport = await estimateCabTransitCost(day?.travel);
+    const transport = {
+      cost: Number(transportMode?.cost || fallbackTransport.cost || 0),
+      mode: transportMode?.mode || 'cab',
+      note: transportMode ? 'Selected journey setup transport' : fallbackTransport.note,
+    };
+    const total = Math.round(transport.cost + hotel.mid + food + activities);
+    const dailyBudget = (Number(trip.budget || 0) / Math.max(1, days)) * 1.2;
+
+    perDay.push({
+      day: Number(day?.day || index + 1),
+      city: day?.city || '',
+      transport,
+      hotel,
+      food,
+      activities,
+      total,
+      withinBudget: total < dailyBudget,
+      recommendations: [],
+    });
+  }
+
+  let smartTips = [];
+  try {
+    const prompt = `You are a smart travel budget advisor for Indian trips.
+Given this trip data, return ONLY valid JSON (no markdown):
+{
+  "perDayRecs": {
+    "1": ["tip1", "tip2"],
+    "2": ["tip1"]
+  },
+  "smartTips": ["overall tip 1", "overall tip 2", "overall tip 3"]
+}
+
+Trip: ${trip.origin} to ${trip.destination}, ${days} days, budget ₹${trip.budget}
+Per day breakdown: ${JSON.stringify(perDay.map((item) => ({
+      day: item.day,
+      city: item.city,
+      hotel: item.hotel.mid,
+      food: item.food,
+      activities: item.activities,
+      transport: item.transport.cost,
+      total: item.total,
+      over: !item.withinBudget,
+    })))}
+
+Focus on: entry fee timings, cheaper alternatives, booking tips, budget warnings.
+Keep each tip under 80 characters. Return raw JSON only.`;
+
+    const response = await llm.invoke(prompt);
+    const raw = String(response?.content || response?.text || '').trim();
+    const cleaned = stripCodeFences(raw);
+    const extracted = extractFirstJsonObject(cleaned);
+    const parsed = (() => {
+      for (const candidate of [cleaned, extracted].filter(Boolean)) {
+        try {
+          return JSON.parse(candidate);
+        } catch (_err) {
+          // try next candidate
+        }
+      }
+      return null;
+    })();
+
+    const perDayRecs = asObject(parsed)?.perDayRecs || {};
+    smartTips = Array.isArray(parsed?.smartTips) ? parsed.smartTips.slice(0, 3) : [];
+
+    perDay.forEach((day) => {
+      const recs = perDayRecs[String(day.day)] || [];
+      day.recommendations = Array.isArray(recs) ? recs.slice(0, 2) : [];
+    });
+  } catch (_error) {
+    smartTips = [];
+  }
+
+  const totalEstimated = perDay.reduce((sum, day) => sum + Number(day.total || 0), 0);
+
+  return res.json({
+    success: true,
+    totalBudget: Number(trip.budget || 0),
+    days: trip.dates || [],
+    totalEstimated,
+    budgetHealth: trip.budget ? Math.round((totalEstimated / Number(trip.budget)) * 100) : 0,
+    perDay,
+    smartTips,
+  });
+});
+
 export {
   createTrip,
   generatePlaces,
   selectPlaces,
   generateItinerary,
-  computeRoute
+  computeRoute,
+  getFlightCost,
+  estimateBudget,
+  getFlightCost as fetchFlightCost,
 };

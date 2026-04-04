@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { computeRoute } from '../api';
+import { computeRoute, fetchBudgetEstimate } from '../api';
+import BudgetBreakdown from '../components/BudgetBreakdown';
 import PlacesMap from '../components/PlacesMap';
 import { optimizeDayPlaces } from '../utils/dayRouteOptimizer';
 import { buildRouteMetrics, formatDistance } from '../utils/routeMath';
@@ -118,6 +119,15 @@ function formatTransit(travel) {
   return `${travel.from} -> ${travel.to}${mode}${duration}`;
 }
 
+function formatCurrency(value) {
+  const amount = Number(value || 0);
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Number.isFinite(amount) ? amount : 0);
+}
+
 function formatMinutes(minutes = 0) {
   const rounded = Math.max(1, Math.round(Number(minutes) || 0));
   if (rounded >= 60) {
@@ -141,6 +151,51 @@ function formatMetric(value, suffix = '') {
   const num = Number(value);
   if (Number.isFinite(num)) return `${num}${suffix}`;
   return `${value}${suffix}`;
+}
+
+function sanitizeActivityTitle(value = '') {
+  return String(value || '')
+    .replace(/\|\s*duration\s*:[^|]*/gi, '')
+    .replace(/\|\s*type\s*:[^|]*/gi, '')
+    .replace(/^\s*(morning|afternoon|evening|night)\s*:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getReadableActivityTitle(activity = {}) {
+  const raw = sanitizeActivityTitle(activity?.title || '');
+  if (!raw) return 'Visit local highlight';
+
+  const transferMatch = raw.match(/^after\s+reaching\s+([^,]+),\s*(.*)$/i);
+  const normalizeVisit = (text = '') => {
+    const core = String(text || '')
+      .replace(/^\s*(visit|explore|discover|tour|walk\s+through|stroll\s+through|shopping\s+at|shopping\s+in|boat\s+ride\s+on|lunch\s+at|dinner\s+at|breakfast\s+at|morning\s+visit\s+to|afternoon\s+visit\s+to|evening\s+visit\s+to)\s+/i, '')
+      .trim();
+    return core ? `Visit ${core}` : 'Visit local highlight';
+  };
+
+  if (transferMatch) {
+    const city = String(transferMatch[1] || '').trim();
+    const rest = String(transferMatch[2] || '').trim();
+    return `After reaching ${city}, ${normalizeVisit(rest)}`;
+  }
+
+  return normalizeVisit(raw);
+}
+
+function getReadableActivityDescription(activity = {}) {
+  const raw = String(activity?.description || '').trim();
+  if (!raw) return '';
+
+  const cleaned = raw
+    .replace(/^\s*\d{1,2}:\d{2}\s*(?:AM|PM)?\s*-\s*/i, '')
+    .replace(/\|\s*Duration\s*:[^|]*/gi, '')
+    .replace(/\|\s*Type\s*:[^|]*/gi, '')
+    .replace(/^\s*(morning|afternoon|evening|night)\s*:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned;
 }
 
 function getVenueFallbackImage(item, mode) {
@@ -198,6 +253,9 @@ export default function ItineraryPlannerPage() {
   const [toast, setToast] = useState(null);
   const [openAdvisoryDayIndex, setOpenAdvisoryDayIndex] = useState(null);
   const [venueDrawer, setVenueDrawer] = useState({ open: false, dayIndex: 0, mode: 'hotels' });
+  const [budgetData, setBudgetData] = useState(null);
+  const [budgetLoading, setBudgetLoading] = useState(false);
+  const [budgetError, setBudgetError] = useState('');
 
   const toastTimerRef = useRef(null);
   const lastRemovedRef = useRef(null);
@@ -343,6 +401,60 @@ export default function ItineraryPlannerPage() {
 
   const activeDay = days[activeDayIndex] || null;
   const advisoryDay = openAdvisoryDayIndex === null ? null : days[openAdvisoryDayIndex] || null;
+  const budgetSegmentModes = journey?.stayPreferences?.segmentModes || journey?.segmentModes || {};
+  const budgetSegmentModesKey = useMemo(() => JSON.stringify(budgetSegmentModes || {}), [budgetSegmentModes]);
+
+  const budgetByDay = useMemo(() => {
+    const entries = Array.isArray(budgetData?.perDay) ? budgetData.perDay : [];
+    return entries.reduce((map, item) => {
+      const dayNumber = Number(item?.day || 0);
+      if (dayNumber > 0) {
+        map.set(dayNumber, item);
+      }
+      return map;
+    }, new Map());
+  }, [budgetData]);
+
+  const totalBudgetAmount = Number(budgetData?.totalBudget || journey?.budget || 0);
+  const estimatedBudgetAmount = Number(budgetData?.totalEstimated || 0);
+
+  useEffect(() => {
+    if (!tripId) {
+      setBudgetData(null);
+      setBudgetError('');
+      setBudgetLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadBudget = async () => {
+      setBudgetLoading(true);
+      setBudgetError('');
+
+      try {
+        const parsedSegmentModes = budgetSegmentModesKey && budgetSegmentModesKey !== '{}' ? JSON.parse(budgetSegmentModesKey) : {};
+        const payload = Object.keys(parsedSegmentModes || {}).length ? { segmentModes: parsedSegmentModes } : {};
+        const response = await fetchBudgetEstimate(tripId, payload);
+        if (cancelled) return;
+        setBudgetData(response || null);
+      } catch (error) {
+        if (cancelled) return;
+        setBudgetData(null);
+        setBudgetError(error?.message || 'Budget estimate unavailable.');
+      } finally {
+        if (!cancelled) {
+          setBudgetLoading(false);
+        }
+      }
+    };
+
+    loadBudget();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [budgetSegmentModesKey, tripId]);
 
   useEffect(() => {
     if (openAdvisoryDayIndex === null) return;
@@ -901,6 +1013,14 @@ export default function ItineraryPlannerPage() {
                 </ul>
               </div>
             </div>
+
+            <BudgetBreakdown
+              budgetData={budgetData}
+              loading={budgetLoading}
+              error={budgetError}
+              totalBudget={totalBudgetAmount}
+              estimatedBudget={estimatedBudgetAmount}
+            />
           </aside>
 
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 p-5 lg:col-span-8">
@@ -948,6 +1068,47 @@ export default function ItineraryPlannerPage() {
 
                   </div>
 
+                    {budgetLoading ? (
+                      <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-400">
+                        Budget strip loading...
+                      </div>
+                    ) : budgetByDay.get(Number(day.day || index + 1)) ? (
+                      <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/8 px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Budget Strip</p>
+                          <span className={`text-xs font-semibold uppercase tracking-[0.12em] ${budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'text-emerald-200' : 'text-rose-200'}`}>
+                            {budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'Within plan' : 'Over plan'}
+                          </span>
+                        </div>
+                        <div className="mt-3 grid gap-2 text-xs text-slate-200 sm:grid-cols-2 lg:grid-cols-5">
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Hotel</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.hotel?.mid || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Food</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.food || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Activities</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.activities || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Transport</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.transport?.cost || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-amber-300/25 bg-amber-500/10 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-amber-200">Total</p>
+                            <p className="mt-1 font-semibold text-amber-50">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.total || 0)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : budgetError ? (
+                      <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-400">
+                        {budgetError}
+                      </div>
+                    ) : null}
+
                   <div className="mt-5">
                     <section>
                       <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Activities</p>
@@ -955,7 +1116,7 @@ export default function ItineraryPlannerPage() {
                         {(day.activities || []).map((activity, activityIndex) => (
                           <li key={`${day.day}-${activityIndex}`} className="pl-1">
                             <div className="flex items-start justify-between gap-3">
-                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {activity.title}</p>
+                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {getReadableActivityTitle(activity)}</p>
                               <button
                                 type="button"
                                 onClick={(event) => {
@@ -968,8 +1129,7 @@ export default function ItineraryPlannerPage() {
                                 Remove
                               </button>
                             </div>
-                            <p className="mt-1 text-xs text-slate-400">{activity.location || day.city}</p>
-                            {activity.description ? <p className="mt-1 text-sm text-slate-300">{activity.description}</p> : null}
+                            {activity.description ? <p className="mt-1 text-sm text-slate-300">{getReadableActivityDescription(activity)}</p> : null}
 
                             {index === activeDayIndex && activityIndex < (day.activities || []).length - 1 ? (
                               <div className="mt-2 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
@@ -1091,22 +1251,6 @@ export default function ItineraryPlannerPage() {
                 </p>
               </section>
 
-              <section className="mt-4 rounded-xl border border-emerald-300/20 bg-emerald-500/10 p-4 text-emerald-50">
-                <p className="text-xs uppercase tracking-[0.14em] text-emerald-200">Why Today\'s Stops Fit</p>
-                {(advisoryDay.activities || []).some((activity) => Boolean(activity?.description)) ? (
-                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-emerald-100/95">
-                    {(advisoryDay.activities || [])
-                      .map((activity) => activity?.description)
-                      .filter(Boolean)
-                      .slice(0, 3)
-                      .map((description, descriptionIndex) => (
-                        <li key={`advisory-panel-${openAdvisoryDayIndex}-${descriptionIndex}`}>{description}</li>
-                      ))}
-                  </ul>
-                ) : (
-                  <p className="mt-2 text-sm text-emerald-100/95">No place-level advisory notes available.</p>
-                )}
-              </section>
             </div>
           </aside>
         </>
