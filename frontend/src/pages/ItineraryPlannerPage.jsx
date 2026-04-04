@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import PlacesMap from '../components/PlacesMap';
+import { optimizeDayPlaces } from '../utils/dayRouteOptimizer';
 
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
+const SNAPSHOT_KEY = 'itinerary-planner:snapshot:v1';
 
 function getPlaceLabel(place) {
   if (!place) return '';
@@ -11,6 +13,73 @@ function getPlaceLabel(place) {
 
 function normalizeName(value = '') {
   return String(value || '').toLowerCase().split(',')[0].trim();
+}
+
+function readSnapshot() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.journey || !parsed?.itineraryBundle) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSnapshot(snapshot) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function clearSnapshot() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(SNAPSHOT_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function pickPlaceForActivity(activity, selectedPlaces, dayCity = '', used = new Set()) {
+  const activityTitle = normalizeName(activity?.title || '');
+  const activityLocation = normalizeName(activity?.location || '');
+  const dayCityKey = normalizeName(dayCity || '');
+
+  let bestIndex = -1;
+  let bestScore = 0;
+
+  selectedPlaces.forEach((place, index) => {
+    if (used.has(index)) return;
+
+    const placeName = normalizeName(place?.name || '');
+    const placeLocation = normalizeName(place?.location || '');
+    if (!placeName) return;
+
+    let score = 0;
+    if (activityTitle && activityTitle.includes(placeName)) score += 6;
+    if (activityTitle && placeName.includes(activityTitle)) score += 2;
+    if (activityLocation && placeLocation && activityLocation.includes(placeLocation)) score += 3;
+    if (dayCityKey && placeLocation && dayCityKey === placeLocation) score += 2;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+      return;
+    }
+
+    if (score === bestScore && score > 0 && bestIndex >= 0 && index < bestIndex) {
+      bestIndex = index;
+    }
+  });
+
+  if (bestIndex < 0 || bestScore <= 0) return null;
+  return { index: bestIndex, place: selectedPlaces[bestIndex] };
 }
 
 async function geocodePlace(name) {
@@ -44,33 +113,218 @@ export default function ItineraryPlannerPage() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const journey = location.state?.journey || null;
-  const itineraryBundle = location.state?.itinerary || null;
-  const selectedPlaces = Array.isArray(location.state?.selectedPlaces) ? location.state.selectedPlaces : [];
+  const incomingJourney = location.state?.journey || null;
+  const incomingItineraryBundle = location.state?.itinerary || null;
+  const incomingSelectedPlaces = Array.isArray(location.state?.selectedPlaces) ? location.state.selectedPlaces : [];
+  const incomingTripId = location.state?.tripId || '';
+
+  const [journey, setJourney] = useState(incomingJourney);
+  const [itineraryBundle, setItineraryBundle] = useState(incomingItineraryBundle);
+  const [selectedPlaces, setSelectedPlaces] = useState(incomingSelectedPlaces);
+  const [tripId, setTripId] = useState(incomingTripId);
+
   const [activeDayIndex, setActiveDayIndex] = useState(0);
   const [focusedPlaceName, setFocusedPlaceName] = useState('');
   const [resolvedRoutePlaces, setResolvedRoutePlaces] = useState([]);
+  const [routeRefreshToken, setRouteRefreshToken] = useState(0);
+  const [routeError, setRouteError] = useState('');
+  const [toast, setToast] = useState(null);
+
+  const toastTimerRef = useRef(null);
+  const lastRemovedRef = useRef(null);
+
+  const showToast = (nextToast) => {
+    setToast(nextToast);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 3000);
+  };
+
+  useEffect(() => () => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const hasIncoming = Boolean(incomingJourney && incomingItineraryBundle);
+
+    if (hasIncoming) {
+      // New trip generation should reset previous snapshot state.
+      clearSnapshot();
+      setJourney(incomingJourney);
+      setItineraryBundle(incomingItineraryBundle);
+      setSelectedPlaces(incomingSelectedPlaces);
+      setTripId(incomingTripId || '');
+      setActiveDayIndex(0);
+      return;
+    }
+
+    const saved = readSnapshot();
+    if (!saved) return;
+
+    setJourney(saved.journey || null);
+    setItineraryBundle(saved.itineraryBundle || null);
+    setSelectedPlaces(Array.isArray(saved.selectedPlaces) ? saved.selectedPlaces : []);
+    setTripId(saved.tripId || '');
+    setActiveDayIndex(Number.isInteger(saved.activeDayIndex) ? Math.max(saved.activeDayIndex, 0) : 0);
+  }, [incomingItineraryBundle, incomingJourney, incomingSelectedPlaces, incomingTripId]);
+
+  useEffect(() => {
+    if (!journey || !itineraryBundle) return;
+    writeSnapshot({
+      journey,
+      itineraryBundle,
+      selectedPlaces,
+      activeDayIndex,
+      tripId,
+    });
+  }, [activeDayIndex, itineraryBundle, journey, selectedPlaces, tripId]);
 
   const days = useMemo(() => {
     if (!itineraryBundle?.itinerary || !Array.isArray(itineraryBundle.itinerary)) return [];
     return itineraryBundle.itinerary;
   }, [itineraryBundle]);
 
-  const selectedPlaceMap = useMemo(() => {
-    const map = new Map();
-    selectedPlaces.forEach((place) => {
-      if (!place?.name) return;
-      map.set(place.name.toLowerCase(), place);
-    });
-    return map;
-  }, [selectedPlaces]);
+  const activeDayMapPlaces = useMemo(() => selectedPlaces, [selectedPlaces]);
 
-  const activeDayMapPlaces = useMemo(() => {
-    // IMPORTANT: Always show ALL selected places on the map, not filtered by day
-    // This ensures users can see all the places the LLM selected for their trip
-    // The day view is just for itinerary navigation - it shouldn't limit map visibility
-    return selectedPlaces;
-  }, [selectedPlaces]);
+  const activeDay = days[activeDayIndex] || null;
+
+  const activeDayRoutePlaces = useMemo(() => {
+    if (!activeDay) return [];
+
+    const used = new Set();
+    const matched = (activeDay.activities || [])
+      .map((activity) => {
+        const picked = pickPlaceForActivity(activity, selectedPlaces, activeDay.city, used);
+        if (!picked) return null;
+        used.add(picked.index);
+        return picked.place;
+      })
+      .filter(Boolean);
+
+    return optimizeDayPlaces(matched);
+  }, [activeDay, selectedPlaces]);
+
+  const removeSinglePlaceInstance = (activity, dayCity) => {
+    const used = new Set();
+    const found = pickPlaceForActivity(activity, selectedPlaces, dayCity, used);
+    if (!found) return null;
+
+    const nextPlaces = [...selectedPlaces];
+    const [removedPlace] = nextPlaces.splice(found.index, 1);
+    setSelectedPlaces(nextPlaces);
+
+    return {
+      place: removedPlace,
+      index: found.index,
+    };
+  };
+
+  const handleRemoveActivity = (dayIndex, activityIndex) => {
+    if (!itineraryBundle?.itinerary?.[dayIndex]) return;
+
+    const targetDay = itineraryBundle.itinerary[dayIndex];
+    const activity = targetDay?.activities?.[activityIndex];
+    if (!activity) return;
+
+    const removedPlaceInfo = removeSinglePlaceInstance(activity, targetDay.city);
+
+    const nextDays = [...itineraryBundle.itinerary];
+    const nextDayActivities = [...(targetDay.activities || [])];
+    nextDayActivities.splice(activityIndex, 1);
+
+    let dayRemoved = false;
+    let removedDaySnapshot = null;
+
+    if (nextDayActivities.length === 0) {
+      dayRemoved = true;
+      removedDaySnapshot = targetDay;
+      nextDays.splice(dayIndex, 1);
+    } else {
+      nextDays[dayIndex] = {
+        ...targetDay,
+        activities: nextDayActivities,
+      };
+    }
+
+    const nextItinerary = {
+      ...itineraryBundle,
+      itinerary: nextDays,
+    };
+
+    setItineraryBundle(nextItinerary);
+    setActiveDayIndex((prev) => {
+      if (!dayRemoved) return prev;
+      if (prev > dayIndex) return prev - 1;
+      return Math.min(prev, Math.max(nextDays.length - 1, 0));
+    });
+    setRouteRefreshToken((prev) => prev + 1);
+
+    lastRemovedRef.current = {
+      activity,
+      dayIndex,
+      activityIndex,
+      dayRemoved,
+      removedDaySnapshot,
+      removedPlaceInfo,
+    };
+
+    showToast({
+      kind: 'remove',
+      message: 'Place removed from itinerary.',
+      actionLabel: 'Undo',
+    });
+  };
+
+  const handleUndoRemove = () => {
+    const payload = lastRemovedRef.current;
+    if (!payload || !itineraryBundle) return;
+
+    const nextDays = [...(itineraryBundle.itinerary || [])];
+    const targetIndex = Math.min(payload.dayIndex, nextDays.length);
+
+    if (payload.dayRemoved) {
+      nextDays.splice(targetIndex, 0, payload.removedDaySnapshot);
+    } else {
+      const day = nextDays[targetIndex];
+      if (!day) return;
+      const activities = [...(day.activities || [])];
+      const insertAt = Math.min(payload.activityIndex, activities.length);
+      activities.splice(insertAt, 0, payload.activity);
+      nextDays[targetIndex] = {
+        ...day,
+        activities,
+      };
+    }
+
+    if (payload.removedPlaceInfo?.place) {
+      setSelectedPlaces((prev) => {
+        const next = [...prev];
+        const index = Math.min(payload.removedPlaceInfo.index, next.length);
+        next.splice(index, 0, payload.removedPlaceInfo.place);
+        return next;
+      });
+    }
+
+    setItineraryBundle({
+      ...itineraryBundle,
+      itinerary: nextDays,
+    });
+    setActiveDayIndex(Math.min(payload.dayIndex, Math.max(nextDays.length - 1, 0)));
+    setRouteRefreshToken((prev) => prev + 1);
+
+    lastRemovedRef.current = null;
+    showToast({
+      kind: 'undo',
+      message: 'Place restored and route re-optimized.',
+      actionLabel: null,
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -128,7 +382,7 @@ export default function ItineraryPlannerPage() {
   const routeCheckpointPlaces = useMemo(() => resolvedRoutePlaces, [resolvedRoutePlaces]);
 
   const mapPlaces = activeDayMapPlaces.length ? activeDayMapPlaces : routeCheckpointPlaces;
-  const activeDayPlaceNames = activeDayMapPlaces.map((place) => place?.name).filter(Boolean);
+  const activeDayPlaceNames = activeDayRoutePlaces.map((place) => place?.name).filter(Boolean);
 
   if (!journey || !itineraryBundle) {
     return (
@@ -163,7 +417,7 @@ export default function ItineraryPlannerPage() {
             <div className="mt-4 space-y-4 rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-slate-400">
               <PlacesMap
                 places={mapPlaces}
-                routePlaces={routeCheckpointPlaces}
+                routePlaces={activeDayRoutePlaces}
                 className="h-96"
                 showRoute
                 originName={journey?.origin?.name || journey?.origin || ''}
@@ -171,11 +425,24 @@ export default function ItineraryPlannerPage() {
                 activePlaceNames={activeDayPlaceNames}
                 focusPlaceName={focusedPlaceName}
                 onMarkerClick={(name) => setFocusedPlaceName(name)}
+                routeRefreshToken={routeRefreshToken}
+                fitSignal={`${activeDayIndex}:${routeRefreshToken}`}
+                onRouteError={(error) => setRouteError(error?.message || 'Route service unavailable. Showing fallback path.')}
               />
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setRouteRefreshToken((prev) => prev + 1)}
+                  className="rounded border border-amber-300/40 bg-amber-500/10 px-3 py-1.5 text-amber-200 transition hover:bg-amber-500/20"
+                >
+                  Refresh Route
+                </button>
+                {routeError ? <span className="text-amber-200/90">{routeError}</span> : <span className="text-slate-500">Active day route</span>}
+              </div>
               <div className="mt-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Mapped Stops</p>
                 <ul className="mt-2 space-y-2 text-sm text-slate-300">
-                  {mapPlaces.slice(0, 12).map((place, index) => (
+                  {(activeDayRoutePlaces.length ? activeDayRoutePlaces : mapPlaces).slice(0, 12).map((place, index) => (
                     <li key={`${place.name}-${index}`}>
                       <button
                         type="button"
@@ -230,7 +497,20 @@ export default function ItineraryPlannerPage() {
                       <ol className="mt-3 space-y-3">
                         {(day.activities || []).map((activity, activityIndex) => (
                           <li key={`${day.day}-${activityIndex}`} className="pl-1">
-                            <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {activity.title}</p>
+                            <div className="flex items-start justify-between gap-3">
+                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {activity.title}</p>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleRemoveActivity(index, activityIndex);
+                                }}
+                                className="rounded border border-red-300/40 bg-red-500/10 px-2 py-1 text-[11px] font-semibold text-red-200 transition hover:bg-red-500/20"
+                                title="Remove this place"
+                              >
+                                Remove
+                              </button>
+                            </div>
                             <p className="mt-1 text-xs text-slate-400">{activity.location || day.city}</p>
                             {activity.description ? <p className="mt-1 text-sm text-slate-300">{activity.description}</p> : null}
                           </li>
@@ -305,6 +585,21 @@ export default function ItineraryPlannerPage() {
           </Link>
         </div>
       </div>
+
+      {toast ? (
+        <div className="fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border border-slate-700 bg-slate-900/95 p-3 shadow-xl">
+          <p className="text-sm text-slate-100">{toast.message}</p>
+          {toast.actionLabel ? (
+            <button
+              type="button"
+              onClick={handleUndoRemove}
+              className="mt-2 rounded border border-amber-300/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
+            >
+              {toast.actionLabel}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </main>
   );
 }

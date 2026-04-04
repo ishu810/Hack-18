@@ -2,6 +2,7 @@ import { Travel } from '../models/travel.model.js';
 import { ChatOpenAI } from '@langchain/openai';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { buildItineraryPrompt } from '../utils/itineraryPrompt.js';
+import { computeRoute as computeRouteService } from '../services/routing/routing.service.js';
 import axios from 'axios';
 
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
@@ -999,9 +1000,32 @@ const generateItinerary = asyncHandler(async (req, res) => {
   }
 });
 
+const computeRoute = asyncHandler(async (req, res) => {
+  const { waypoints = [], mode = 'drive', options = {} } = req.body || {};
+  const result = await computeRouteService({ waypoints, mode, options });
+
+  if (!result.ok) {
+    return res.status(200).json({
+      success: false,
+      error: result.error,
+      route: result.route,
+      cacheHit: Boolean(result.cacheHit),
+      inputHash: result.inputHash || null,
+    });
+  }
+
+  return res.json({
+    success: true,
+    route: result.route,
+    cacheHit: Boolean(result.cacheHit),
+    inputHash: result.inputHash,
+  });
+});
+
 export {
   createTrip,
   generatePlaces,
   selectPlaces,
-  generateItinerary
+  generateItinerary,
+  computeRoute
 };

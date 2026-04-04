@@ -75,3 +75,10 @@ export function generateItinerary(tripId) {
     method: 'GET',
   });
 }
+
+export function computeRoute(payload) {
+  return apiRequest('/api/travel/route/compute', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}

@@ -7,6 +7,7 @@ import PlacesMap from '../components/PlacesMap';
 const MotionSection = motion.section;
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
 const HISTORY_KEY = 'agentJourneyHistory';
+const ITINERARY_SNAPSHOT_KEY = 'itinerary-planner:snapshot:v1';
 const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', 'Stay Preferences', 'Final Route'];
 
 function getPlaceLabel(place) {
@@ -388,6 +389,12 @@ export default function AgentHomePage() {
 
       await selectPlaces(currentTripId, selectedPlaces);
       const itineraryResp = await generateItinerary(currentTripId);
+
+      try {
+        window.localStorage.removeItem(ITINERARY_SNAPSHOT_KEY);
+      } catch {
+        // Ignore storage errors.
+      }
 
       navigate('/itinerary-planner', {
         state: {

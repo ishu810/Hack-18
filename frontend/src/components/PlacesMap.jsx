@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
-import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap } from 'react-leaflet';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { MapContainer, Marker, Popup, TileLayer, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
+import { computeRoute } from '../api';
+import MapRouteLayer from './MapRouteLayer';
 import 'leaflet/dist/leaflet.css';
 
 delete L.Icon.Default.prototype._getIconUrl;
@@ -9,8 +11,6 @@ L.Icon.Default.mergeOptions({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
-
-const GEOAPIFY_KEY = import.meta.env.VITE_GEOAPIFY_API_KEY || import.meta.env.VITE_GEOAPIFY_KEY;
 
 const MARKER_COLORS = {
   current: '#0ea5e9',
@@ -34,6 +34,21 @@ function toLatLng(place) {
   return [lat, lng];
 }
 
+function dedupeConsecutivePoints(points = []) {
+  const deduped = [];
+  for (const point of points) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev[0] === point[0] && prev[1] === point[1]) continue;
+    deduped.push(point);
+  }
+  return deduped;
+}
+
+function buildRouteInputHash(points = [], mode = 'drive', options = {}) {
+  const coords = points.map((point) => `${Number(point[0]).toFixed(6)},${Number(point[1]).toFixed(6)}`).join('|');
+  return `${mode}|${JSON.stringify(options || {})}|${coords}`;
+}
+
 function getBoundsCenter(points) {
   if (!points.length) return [20.5937, 78.9629];
   const lat = points.reduce((sum, point) => sum + point[0], 0) / points.length;
@@ -41,7 +56,7 @@ function getBoundsCenter(points) {
   return [lat, lng];
 }
 
-function MapAutoFit({ points }) {
+function MapAutoFit({ points, fitSignal }) {
   const map = useMap();
 
   useEffect(() => {
@@ -53,7 +68,7 @@ function MapAutoFit({ points }) {
 
     const bounds = L.latLngBounds(points.map((point) => L.latLng(point[0], point[1])));
     map.fitBounds(bounds, { padding: [26, 26] });
-  }, [map, points]);
+  }, [fitSignal, map, points]);
 
   return null;
 }
@@ -148,28 +163,6 @@ function LegendCard() {
   );
 }
 
-async function fetchRoute(points) {
-  if (!GEOAPIFY_KEY || points.length < 2) return null;
-
-  const waypoints = points.map((point) => `${point[0]},${point[1]}`).join('|');
-  const response = await fetch(`https://api.geoapify.com/v1/routing?waypoints=${waypoints}&mode=drive&apiKey=${GEOAPIFY_KEY}`);
-  if (!response.ok) return null;
-
-  const data = await response.json();
-  const geometry = data?.features?.[0]?.geometry;
-  if (!geometry) return null;
-
-  if (geometry.type === 'LineString') {
-    return geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-  }
-
-  if (geometry.type === 'MultiLineString') {
-    return geometry.coordinates.flat().map(([lon, lat]) => [lat, lon]);
-  }
-
-  return null;
-}
-
 export default function PlacesMap({
   places = [],
   routePlaces = [],
@@ -181,6 +174,12 @@ export default function PlacesMap({
   focusPlaceName = '',
   onMarkerClick = null,
   userLocation = null,
+  routeMode = 'drive',
+  routeOptions = {},
+  routeRefreshToken = 0,
+  routeDebounceMs = 300,
+  fitSignal = 'initial',
+  onRouteError = null,
 }) {
   const validPlaces = useMemo(() => {
     const merged = [...(routePlaces || []), ...(places || [])];
@@ -212,36 +211,77 @@ export default function PlacesMap({
       .map((place) => toLatLng(place))
       .filter(Boolean);
 
-    return source;
+    return dedupeConsecutivePoints(source);
   }, [routePlaces, validPlaces]);
 
   const [routePoints, setRoutePoints] = useState([]);
+  const localRouteCacheRef = useRef(new Map());
+  const requestSeqRef = useRef(0);
+  const lastRefreshTokenRef = useRef(routeRefreshToken);
+  const routeInputHash = useMemo(
+    () => buildRouteInputHash(routeInputPoints, routeMode, routeOptions),
+    [routeInputPoints, routeMode, routeOptions],
+  );
 
   useEffect(() => {
-    let mounted = true;
+    if (!showRoute || routeInputPoints.length < 2) {
+      setRoutePoints([]);
+      return undefined;
+    }
 
-    const loadRoute = async () => {
-      if (!showRoute || routeInputPoints.length < 2) {
-        setRoutePoints([]);
-        return;
+    const forceRefresh = routeRefreshToken !== lastRefreshTokenRef.current;
+    lastRefreshTokenRef.current = routeRefreshToken;
+
+    if (!forceRefresh) {
+      const cached = localRouteCacheRef.current.get(routeInputHash);
+      if (cached && Array.isArray(cached) && cached.length > 1) {
+        setRoutePoints(cached);
+        return undefined;
       }
+    }
 
-      const path = await fetchRoute(routeInputPoints);
-      if (!mounted) return;
+    requestSeqRef.current += 1;
+    const seq = requestSeqRef.current;
 
-      if (Array.isArray(path) && path.length > 1) {
-        setRoutePoints(path);
-      } else {
+    const timer = window.setTimeout(async () => {
+      try {
+        const payload = {
+          waypoints: routeInputPoints.map((point) => ({ lat: point[0], lng: point[1] })),
+          mode: routeMode,
+          options: routeOptions,
+        };
+
+        const response = await computeRoute(payload);
+        if (seq !== requestSeqRef.current) return;
+
+        if (response?.success && Array.isArray(response?.route?.polyline) && response.route.polyline.length > 1) {
+          localRouteCacheRef.current.set(routeInputHash, response.route.polyline);
+          setRoutePoints(response.route.polyline);
+          return;
+        }
+
         setRoutePoints(routeInputPoints);
+        if (typeof onRouteError === 'function') {
+          onRouteError(response?.error || { message: 'Routing service returned no route polyline.' });
+        }
+      } catch (error) {
+        if (seq !== requestSeqRef.current) return;
+        setRoutePoints(routeInputPoints);
+        if (typeof onRouteError === 'function') {
+          onRouteError({
+            code: 'ROUTE_FETCH_FAILED',
+            message: error?.message || 'Route request failed.',
+          });
+        }
       }
-    };
-
-    loadRoute();
+    }, Math.max(120, Number(routeDebounceMs) || 300));
 
     return () => {
-      mounted = false;
+      window.clearTimeout(timer);
     };
-  }, [routeInputPoints, showRoute]);
+  }, [onRouteError, routeDebounceMs, routeInputHash, routeInputPoints, routeMode, routeOptions, routeRefreshToken, showRoute]);
+
+  const fitPoints = routePoints.length > 1 ? routePoints : points;
 
   return (
     <div className={`overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70 ${className}`}>
@@ -252,15 +292,10 @@ export default function PlacesMap({
           maxZoom={20}
         />
         <MapSizeFix />
-        <MapAutoFit points={points} />
+        <MapAutoFit points={fitPoints} fitSignal={fitSignal} />
         <FocusPlace focusPlaceName={focusPlaceName} places={validPlaces} />
 
-        {routePoints.length > 1 && (
-          <>
-            <Polyline positions={routePoints} pathOptions={{ color: '#ffffff', weight: 7, opacity: 0.65 }} />
-            <Polyline positions={routePoints} pathOptions={{ color: '#f59e0b', weight: 4, opacity: 0.95 }} />
-          </>
-        )}
+        <MapRouteLayer points={routePoints} />
 
         {userLocation && Number.isFinite(Number(userLocation?.lat)) && Number.isFinite(Number(userLocation?.lng)) ? (
           <Marker
