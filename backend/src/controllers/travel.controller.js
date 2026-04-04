@@ -241,6 +241,67 @@ const distanceKm = (a, b) => {
   return 6371 * 2 * Math.atan2(Math.sqrt(val), Math.sqrt(1 - val));
 };
 
+const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
+  const days = Math.max(1, Number(tripDays) || 1);
+  const cleanedPlaces = (Array.isArray(selectedPlaces) ? selectedPlaces : [])
+    .filter((place) => place && place.name)
+    .map((place) => ({
+      ...place,
+      location: String(place.location || '').trim(),
+      lat: toFiniteNumber(place.lat),
+      lng: toFiniteNumber(place.lng)
+    }));
+
+  const groupedPlacesByDay = Array.from({ length: days }, () => []);
+  if (!cleanedPlaces.length) {
+    return {
+      orderedPlaces: [],
+      groupedPlacesByDay
+    };
+  }
+
+  const byLocation = new Map();
+  cleanedPlaces.forEach((place) => {
+    const key = normalizePlaceName(place.location || 'unspecified');
+    if (!byLocation.has(key)) byLocation.set(key, []);
+    byLocation.get(key).push(place);
+  });
+
+  const locationGroups = [...byLocation.values()].sort((a, b) => b.length - a.length);
+
+  locationGroups.forEach((group) => {
+    let targetDay = 0;
+    for (let index = 1; index < groupedPlacesByDay.length; index += 1) {
+      if (groupedPlacesByDay[index].length < groupedPlacesByDay[targetDay].length) {
+        targetDay = index;
+      }
+    }
+    groupedPlacesByDay[targetDay].push(...group);
+  });
+
+  // Ensure every day gets at least one place when possible.
+  for (let dayIndex = 0; dayIndex < groupedPlacesByDay.length; dayIndex += 1) {
+    if (groupedPlacesByDay[dayIndex].length) continue;
+
+    let donorDay = -1;
+    for (let index = 0; index < groupedPlacesByDay.length; index += 1) {
+      if (groupedPlacesByDay[index].length > 1 && (donorDay === -1 || groupedPlacesByDay[index].length > groupedPlacesByDay[donorDay].length)) {
+        donorDay = index;
+      }
+    }
+
+    if (donorDay !== -1) {
+      groupedPlacesByDay[dayIndex].push(groupedPlacesByDay[donorDay].pop());
+    }
+  }
+
+  const orderedPlaces = groupedPlacesByDay.flat();
+  return {
+    orderedPlaces,
+    groupedPlacesByDay
+  };
+};
+
 const scorePlaceForSelection = (place = {}) => {
   const popularity = Number(place?.popularity) || 0;
   const rating = Number(place?.rating) || 0;
@@ -755,6 +816,73 @@ const buildGuaranteedFallbackImage = (place) => {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'place';
   return `https://picsum.photos/seed/${encodeURIComponent(seed)}/1200/800`;
+};
+
+const stripCodeFences = (value = '') => String(value || '')
+  .replace(/^```(?:json)?\s*/i, '')
+  .replace(/\s*```$/i, '')
+  .trim();
+
+const extractFirstJsonObject = (text = '') => {
+  const source = String(text || '');
+  const start = source.indexOf('{');
+  if (start === -1) return '';
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < source.length; index += 1) {
+    const ch = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1).trim();
+    }
+  }
+
+  const end = source.lastIndexOf('}');
+  return end > start ? source.slice(start, end + 1).trim() : '';
+};
+
+const parseItineraryJsonSafely = async (rawContent = '') => {
+  const cleaned = stripCodeFences(rawContent);
+  const extracted = extractFirstJsonObject(cleaned);
+  const candidates = [cleaned, extracted].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch (_err) {
+      // Try next candidate.
+    }
+  }
+
+  const repairPrompt = `You are a JSON repair tool. Convert the following content into ONE valid JSON object only. Return strict JSON with no markdown fences, comments, or extra text.\n\n${cleaned}`;
+  const repairResponse = await llm.invoke(repairPrompt);
+  const repairedRaw = String(repairResponse?.content || repairResponse?.text || '').trim();
+  const repairedClean = stripCodeFences(repairedRaw);
+  const repairedExtracted = extractFirstJsonObject(repairedClean);
+  const repairedCandidate = repairedExtracted || repairedClean;
+
+  return JSON.parse(repairedCandidate);
 };
 
 const parseMaybeJson = (value) => {
@@ -1369,7 +1497,7 @@ const selectPlaces = asyncHandler(async (req, res) => {
     const trip = await Travel.findByIdAndUpdate(tripId, {
       selectedPlaces: normalizedSelected,
       status: 'places_selected'
-    }, { new: true });
+    }, { returnDocument: 'after' });
 
     if (!trip) {
       console.error('❌ Trip not found:', tripId);
@@ -1468,15 +1596,11 @@ const generateItinerary = asyncHandler(async (req, res) => {
     console.log('🔄 Calling LLM...');
     const response = await llm.invoke(prompt);
     const content = (response.content || response.text || '{}').toString();
-    const cleaned = content
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/, '')
-      .trim();
     
     console.log('✅ LLM response received, length:', content.length);
     console.log('📝 Response preview:', content.substring(0, 200));
     
-    itineraryData = JSON.parse(cleaned);
+    itineraryData = await parseItineraryJsonSafely(content);
     console.log('✅ Response parsed successfully');
     console.log('📊 Itinerary days:', itineraryData.itinerary?.length);
   } catch (error) {
