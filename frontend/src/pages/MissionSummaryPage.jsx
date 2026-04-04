@@ -41,12 +41,6 @@ export default function MissionSummaryPage() {
         transition={{ duration: 0.3, ease: 'easeOut' }}
         className="relative z-10 mx-auto flex w-full max-w-3xl flex-col rounded-3xl border border-slate-700/70 bg-slate-950/70 p-6 shadow-[0_28px_80px_rgba(2,6,23,0.66)] backdrop-blur-md md:p-10"
       >
-        <div className="mb-8 text-center">
-          <p className="text-xs uppercase tracking-[0.28em] text-amber-300/80">Mission Approved</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Route Secured</h1>
-          <p className="mt-2 text-sm text-slate-400">Your selected checkpoints are locked and ready for execution.</p>
-        </div>
-
         <section className="space-y-5 rounded-2xl border border-slate-800 bg-slate-900/70 p-5 md:p-6">
           <div className="grid gap-4 md:grid-cols-2">
             <div>
@@ -75,14 +69,38 @@ export default function MissionSummaryPage() {
           </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-            <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Checkpoints</p>
-            <p className="mt-2 text-sm leading-7 text-amber-100/90">
-              {journey.route.map((place) => getPlaceLabel(place)).join(' → ')}
-            </p>
+            <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Final Route</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {(journey.route || []).map((place, index) => {
+                const label = getPlaceLabel(place);
+                const isStart = index === 0;
+                const isEnd = index === (journey.route?.length || 0) - 1;
+
+                return (
+                  <div
+                    key={`${label}-${index}`}
+                    className="rounded-lg border border-slate-700 bg-slate-900/75 p-3 shadow-[0_10px_24px_rgba(2,6,23,0.24)]"
+                  >
+                    <p className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-400">Stop {index + 1}</p>
+                    <p className="mt-1 text-sm font-semibold text-amber-100">{label || 'Unknown checkpoint'}</p>
+                    <p className="mt-2 text-xs text-slate-300">
+                      {isStart ? 'Origin point' : isEnd ? 'Destination point' : 'Intermediate checkpoint'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
 
         <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+          <Link
+            to="/travel-alerts"
+            state={{ journey }}
+            className="rounded-xl border border-blue-400/35 bg-linear-to-r from-blue-500/85 to-blue-700/85 px-5 py-3 text-center text-sm font-semibold uppercase tracking-[0.14em] text-slate-950 transition hover:brightness-110"
+          >
+            Proceed to Travel Alerts
+          </Link>
           <button
             type="button"
             onClick={() => window.print()}
