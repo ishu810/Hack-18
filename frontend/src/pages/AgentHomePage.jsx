@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
+import PlacesMap from '../components/PlacesMap';
 
 const MotionSection = motion.section;
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
@@ -347,6 +348,10 @@ export default function AgentHomePage() {
         name: candidate.name,
         type: candidate.type,
         location: candidate.location,
+        lat: candidate.lat,
+        lng: candidate.lng,
+        rating: candidate.rating,
+        popularity: candidate.popularity,
         best_visit_reason: candidate.best_visit_reason,
         imageUrl: candidate.imageUrl,
       }))
@@ -400,6 +405,28 @@ export default function AgentHomePage() {
   };
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
+  const checkpointMapPlaces = activeRoute
+    .map((place) => ({
+      name: place?.name || '',
+      location: place?.name || '',
+      lat: Number(place?.lat),
+      lng: Number(place?.lng),
+      best_visit_reason: '',
+    }))
+    .filter((place) => Number.isFinite(place.lat) && Number.isFinite(place.lng));
+
+  const finalMapPlaces = activeRoute
+    .slice(1)
+    .flatMap((place) => {
+      const checkpointKey = normalizeName(place);
+      return (checkpointPlaces[checkpointKey] || []).filter(
+        (candidate) => !hiddenPlaces[checkpointKey]?.[normalizeName(candidate.name)],
+      );
+    })
+    .filter((candidate, index, all) =>
+      all.findIndex((item) => `${item.name}|${item.location}` === `${candidate.name}|${candidate.location}`) === index,
+    );
+  const mapPlacesForFinalRoute = finalMapPlaces.length ? finalMapPlaces : checkpointMapPlaces;
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
 
   useEffect(() => {
@@ -1016,14 +1043,19 @@ export default function AgentHomePage() {
               </div>
 
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
-                <div className="relative h-full min-h-80 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70">
-                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(59,130,246,0.2),transparent_40%),radial-gradient(circle_at_85%_12%,rgba(245,158,11,0.18),transparent_40%)]" />
-                  <div className="relative flex h-full items-center justify-center p-6 text-center">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Mission Ready</p>
-                      <p className="mt-2 text-2xl font-semibold text-slate-100">{getPlaceLabel(origin)} → {getPlaceLabel(destination)}</p>
-                      <p className="mt-2 text-sm text-slate-400">All route, budget, and stay selections are locked for review.</p>
-                    </div>
+                <div className="space-y-3">
+                  <PlacesMap
+                    places={mapPlacesForFinalRoute}
+                    routePlaces={checkpointMapPlaces}
+                    className="h-80"
+                    showRoute
+                    originName={getPlaceLabel(origin)}
+                    destinationName={getPlaceLabel(destination)}
+                  />
+                  <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
+                    <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Mission Ready</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-100">{getPlaceLabel(origin)} → {getPlaceLabel(destination)}</p>
+                    <p className="mt-1 text-xs text-slate-400">All route, budget, and stay selections are locked for review.</p>
                   </div>
                 </div>
               </div>

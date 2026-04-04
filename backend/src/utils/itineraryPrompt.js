@@ -2,21 +2,28 @@ export const buildItineraryPrompt = ({ origin, destination, days: tripDays, sele
   const placesText = selectedPlaces.map(p => `${p.name} (${p.location})`).join(', ');
   const dateRange = dates.length > 0 ? `from ${dates[0]} to ${dates[dates.length - 1]}` : '';
   
+  // Cap daily activity density so the plan remains realistic.
+  const totalPlaces = selectedPlaces.length;
+  const activitiesPerDay = Math.min(3, Math.max(1, Math.ceil(totalPlaces / tripDays)));
+  
   return `You are a professional travel planner. Create a detailed, day-wise itinerary for a trip.
 
 TRIP DETAILS:
 - Origin: ${origin}
 - Destination: ${destination}
+- Total Selected Places: ${totalPlaces} places to visit
 - Selected Places: ${placesText}
 - Duration: ${tripDays} day(s) ${dateRange}
 - Budget: ₹${budget}
+
+CRITICAL INSTRUCTION: YOU MUST DISTRIBUTE ALL ${totalPlaces} SELECTED PLACES across the itinerary. Do not skip any places. Each place must appear as an activity in the itinerary.
 
 INSTRUCTIONS (Be CONCISE to minimize tokens - use bullet points, short descriptions):
 Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, include:
 
 1. Day number, city/area, and a short theme (e.g., "Nature & Culture")
 2. Weather: expected condition (e.g., "Clear", "Rainy") - be realistic
-3. Activities: 2-3 activities max with format: "Time: Activity Title | Duration: X min | Type: outdoor/indoor"
+3. Activities: Include up to ${activitiesPerDay} activities (hard max 3 per day) with format: "Time: Activity Title | Duration: X min | Type: outdoor/indoor"
 4. Travel: if moving between places, include "From→To | Duration | Transport | Note"
 5. Food: 1-2 key meals recommended with restaurant type (e.g., "Lunch: Local cuisine near ${destination}")
 6. Dining picks: 1-2 famous dining places with cuisine + what they are best known for

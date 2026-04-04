@@ -1,5 +1,37 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import PlacesMap from '../components/PlacesMap';
+
+const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
+
+function getPlaceLabel(place) {
+  if (!place) return '';
+  return typeof place === 'string' ? place : place.name || '';
+}
+
+function normalizeName(value = '') {
+  return String(value || '').toLowerCase().split(',')[0].trim();
+}
+
+async function geocodePlace(name) {
+  if (!name || !OPENCAGE_API_KEY) return null;
+
+  try {
+    const response = await fetch(
+      `https://api.opencagedata.com/geocode/v1/json?q=${encodeURIComponent(name)}&key=${OPENCAGE_API_KEY}&limit=1`,
+    );
+    const data = await response.json();
+    const first = data?.results?.[0];
+    if (!first?.geometry) return null;
+
+    return {
+      lat: Number(first.geometry.lat),
+      lng: Number(first.geometry.lng),
+    };
+  } catch {
+    return null;
+  }
+}
 
 function formatTransit(travel) {
   if (!travel?.from || !travel?.to) return null;
@@ -15,11 +47,88 @@ export default function ItineraryPlannerPage() {
   const journey = location.state?.journey || null;
   const itineraryBundle = location.state?.itinerary || null;
   const selectedPlaces = Array.isArray(location.state?.selectedPlaces) ? location.state.selectedPlaces : [];
+  const [activeDayIndex, setActiveDayIndex] = useState(0);
+  const [focusedPlaceName, setFocusedPlaceName] = useState('');
+  const [resolvedRoutePlaces, setResolvedRoutePlaces] = useState([]);
 
   const days = useMemo(() => {
     if (!itineraryBundle?.itinerary || !Array.isArray(itineraryBundle.itinerary)) return [];
     return itineraryBundle.itinerary;
   }, [itineraryBundle]);
+
+  const selectedPlaceMap = useMemo(() => {
+    const map = new Map();
+    selectedPlaces.forEach((place) => {
+      if (!place?.name) return;
+      map.set(place.name.toLowerCase(), place);
+    });
+    return map;
+  }, [selectedPlaces]);
+
+  const activeDayMapPlaces = useMemo(() => {
+    // IMPORTANT: Always show ALL selected places on the map, not filtered by day
+    // This ensures users can see all the places the LLM selected for their trip
+    // The day view is just for itinerary navigation - it shouldn't limit map visibility
+    return selectedPlaces;
+  }, [selectedPlaces]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveRoutePlaces = async () => {
+      const route = Array.isArray(journey?.route) ? journey.route : [];
+      if (!route.length) {
+        setResolvedRoutePlaces([]);
+        return;
+      }
+
+      const resolved = await Promise.all(route.map(async (entry) => {
+        const name = getPlaceLabel(entry);
+        if (!name) return null;
+
+        const directLat = Number(typeof entry === 'string' ? NaN : entry?.lat);
+        const directLng = Number(typeof entry === 'string' ? NaN : entry?.lng);
+        if (Number.isFinite(directLat) && Number.isFinite(directLng)) {
+          return { name, location: name, lat: directLat, lng: directLng };
+        }
+
+        const matched = selectedPlaces.find((place) => {
+          const placeName = normalizeName(place?.name);
+          const placeLoc = normalizeName(place?.location);
+          const checkpoint = normalizeName(name);
+          return placeName === checkpoint || placeLoc === checkpoint;
+        });
+
+        const matchedLat = Number(matched?.lat);
+        const matchedLng = Number(matched?.lng);
+        if (Number.isFinite(matchedLat) && Number.isFinite(matchedLng)) {
+          return { name, location: name, lat: matchedLat, lng: matchedLng };
+        }
+
+        const geo = await geocodePlace(name);
+        if (geo && Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
+          return { name, location: name, lat: geo.lat, lng: geo.lng };
+        }
+
+        return null;
+      }));
+
+      if (cancelled) return;
+
+      setResolvedRoutePlaces(resolved.filter((place) => place && Number.isFinite(place.lat) && Number.isFinite(place.lng)));
+    };
+
+    resolveRoutePlaces();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [journey, selectedPlaces]);
+
+  const routeCheckpointPlaces = useMemo(() => resolvedRoutePlaces, [resolvedRoutePlaces]);
+
+  const mapPlaces = activeDayMapPlaces.length ? activeDayMapPlaces : routeCheckpointPlaces;
+  const activeDayPlaceNames = activeDayMapPlaces.map((place) => place?.name).filter(Boolean);
 
   if (!journey || !itineraryBundle) {
     return (
@@ -51,14 +160,30 @@ export default function ItineraryPlannerPage() {
         <section className="grid gap-6 lg:grid-cols-12">
           <aside className="rounded-2xl border border-slate-700 bg-slate-900/70 p-5 lg:col-span-4">
             <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">Map Zone</h2>
-            <div className="mt-4 min-h-130 rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-slate-400">
-              <p className="text-sm">Map placeholder. Live route map will be integrated here.</p>
+            <div className="mt-4 space-y-4 rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-slate-400">
+              <PlacesMap
+                places={mapPlaces}
+                routePlaces={routeCheckpointPlaces}
+                className="h-96"
+                showRoute
+                originName={journey?.origin?.name || journey?.origin || ''}
+                destinationName={journey?.destination?.name || journey?.destination || ''}
+                activePlaceNames={activeDayPlaceNames}
+                focusPlaceName={focusedPlaceName}
+                onMarkerClick={(name) => setFocusedPlaceName(name)}
+              />
               <div className="mt-4">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Selected Stops</p>
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Mapped Stops</p>
                 <ul className="mt-2 space-y-2 text-sm text-slate-300">
-                  {selectedPlaces.slice(0, 12).map((place, index) => (
-                    <li key={`${place.name}-${index}`} className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2">
-                      {place.name}
+                  {mapPlaces.slice(0, 12).map((place, index) => (
+                    <li key={`${place.name}-${index}`}>
+                      <button
+                        type="button"
+                        onClick={() => setFocusedPlaceName(place.name || '')}
+                        className={`w-full rounded border px-3 py-2 text-left transition ${focusedPlaceName === place.name ? 'border-amber-300/70 bg-amber-500/10 text-amber-100' : 'border-slate-700 bg-slate-900/80 text-slate-300 hover:border-amber-300/40'}`}
+                      >
+                        {place.name}
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -71,7 +196,11 @@ export default function ItineraryPlannerPage() {
 
             <div className="mt-4 space-y-5">
               {days.map((day, index) => (
-                <article key={`${day.day || index + 1}-${day.city || 'city'}`} className="rounded-xl border border-slate-700 bg-slate-950/60 p-5">
+                <article
+                  key={`${day.day || index + 1}-${day.city || 'city'}`}
+                  onClick={() => setActiveDayIndex(index)}
+                  className={`cursor-pointer rounded-xl border bg-slate-950/60 p-5 transition ${activeDayIndex === index ? 'border-amber-300/70' : 'border-slate-700'}`}
+                >
                   <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
                     <h3 className="text-xl font-semibold text-amber-200">Day {day.day || index + 1}</h3>
                     <p className="text-sm text-slate-300">{day.city || 'Unknown city'} {day.theme ? `• ${day.theme}` : ''}</p>

@@ -81,6 +81,10 @@ const travelSchema = new mongoose.Schema({
     name: { type: String, default: '' },
     type: { type: String, default: 'unknown' },
     location: { type: String, default: '' },
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
+    rating: { type: Number, default: null },
+    popularity: { type: Number, default: null },
     best_visit_reason: { type: String, default: '' },
     imageUrl: { type: String, default: '' }
   }],
@@ -88,6 +92,10 @@ const travelSchema = new mongoose.Schema({
     name: { type: String, default: '' },
     type: { type: String, default: 'unknown' },
     location: { type: String, default: '' },
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
+    rating: { type: Number, default: null },
+    popularity: { type: Number, default: null },
     best_visit_reason: { type: String, default: '' },
     imageUrl: { type: String, default: '' }
   }],
