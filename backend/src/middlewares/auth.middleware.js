@@ -8,7 +8,10 @@ export const verifyJWT = asyncHandler(async (req, res, next) => {
     req.header("Authorization")?.replace("Bearer ", "");
 
   if (!token) {
-    return res.status(401).json({ message: "Unauthorized request, Token missing" });
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized request, token missing",
+    });
   }
 
   try {
@@ -19,12 +22,18 @@ export const verifyJWT = asyncHandler(async (req, res, next) => {
     );
 
     if (!user) {
-      return res.status(401).json({ message: "Invalid access token" });
+      return res.status(401).json({
+        success: false,
+        message: "Invalid access token",
+      });
     }
 
     req.user = user;
     next();
   } catch (error) {
-    return res.status(401).json({ message: "Token expired or invalid" });
+    return res.status(401).json({
+      success: false,
+      message: "Token expired or invalid",
+    });
   }
 });

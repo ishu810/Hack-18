@@ -13,10 +13,8 @@ app.use(cors({
     credentials: true,
 }));
 
-import userAuthRouter from "./routes/auth.route.js"
 import userRouter from "./routes/user.route.js"
 
-app.use("/api/auth",userAuthRouter)
 app.use("/api/user",userRouter)
 
 app.get("/",(req,res)=>{
