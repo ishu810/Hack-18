@@ -73,3 +73,10 @@ export function generateItinerary(tripId) {
     method: 'GET',
   });
 }
+
+export function optimizeRoutePreview(payload) {
+  return apiRequest('/api/travel/optimize-preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}

@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
+import { createTrip, generateItinerary, generatePlaces, logoutUser, optimizeRoutePreview, selectPlaces } from '../api';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -196,6 +196,37 @@ function findBestRoute(origin, destination, stops) {
   return { route: ordered, totalDistance: Math.round(total), estimatedHours: Math.max(1, Math.round(total / 780)) };
 }
 
+function reorderRouteByStopNames(routePoints, orderedStops) {
+  if (!Array.isArray(routePoints) || routePoints.length === 0) return [];
+  if (!Array.isArray(orderedStops) || orderedStops.length === 0) return routePoints;
+
+  const normalize = (value) => normalizeName(value).toLowerCase();
+  const used = new Set();
+  const ordered = [];
+
+  orderedStops.forEach((stopName) => {
+    const stopNorm = normalize(stopName);
+    if (!stopNorm) return;
+
+    const matchIndex = routePoints.findIndex((point, index) => {
+      if (used.has(index)) return false;
+      const pointNorm = normalize(point);
+      return pointNorm === stopNorm || stopNorm.includes(pointNorm) || pointNorm.includes(stopNorm);
+    });
+
+    if (matchIndex >= 0) {
+      used.add(matchIndex);
+      ordered.push(routePoints[matchIndex]);
+    }
+  });
+
+  routePoints.forEach((point, index) => {
+    if (!used.has(index)) ordered.push(point);
+  });
+
+  return ordered;
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 export default function AgentHomePage() {
@@ -232,6 +263,7 @@ export default function AgentHomePage() {
   const [hiddenPlaces, setHiddenPlaces] = useState({});
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
+  const [routeOptimizing, setRouteOptimizing] = useState(false);
 
   // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
@@ -276,13 +308,23 @@ export default function AgentHomePage() {
   }, [stopSuggestions, origin, destination, stops]);
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
-  const previewSelectedNames = new Set(activeRoute.map((p) => getPlaceLabel(p)));
+  const previewRouteList = finalizedRoute.length > 0
+    ? finalizedRoute
+    : (result?.routeMetrics?.orderedStops?.length
+      ? result.routeMetrics.orderedStops.map((stop) => ({ name: stop }))
+      : activeRoute);
+  const previewSelectedNames = new Set(previewRouteList.map((p) => getPlaceLabel(p)));
   const availablePreviewStopOptions = previewStopSuggestions.filter((p) => !previewSelectedNames.has(p.name));
-  const occupiedEditNames = new Set(activeRoute.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
+  const occupiedEditNames = new Set(previewRouteList.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
   const availableEditStopOptions = editStopSuggestions.filter((p) => !occupiedEditNames.has(p.name));
   const routeMapPoints = activeRoute.filter((p) => typeof p?.lat === 'number' && typeof p?.lng === 'number');
   const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
+  const routeDistanceLabel = result?.routeMetrics?.distanceText || `${result?.totalDistance || 0} km`;
+  const routeDurationLabel = result?.routeMetrics?.durationText || `${result?.estimatedHours || 0} hrs`;
+  const routeSourceLabel = result?.routeMetrics?.source === 'google_maps'
+    ? 'Google Maps Optimized'
+    : 'Local Fallback Optimization';
 
   const getNightLabel = (place, index) => {
     const n = Number(place?.nights);
@@ -394,20 +436,63 @@ export default function AgentHomePage() {
   };
 
   // ── Build journey ──
-  const buildJourney = () => {
+  const buildJourney = async () => {
     setError(''); setPlacesError(''); setCheckpointPlaces({}); setPlacesRequestKey(''); setHiddenPlaces({});
     if (!origin || !destination) { setError('Select valid start and destination cities from suggestions.'); return; }
     if (origin.name === destination.name) { setError('Origin and destination must be different.'); return; }
     if (!departureDate || !comingDate) { setError('Please add both departure and coming dates.'); return; }
     if (new Date(comingDate) < new Date(departureDate)) { setError('Coming date must be after departure date.'); return; }
+
     const optimized = findBestRoute(origin, destination, stops);
+    let route = optimized.route;
+    let routeMetrics = {
+      source: 'local_fallback',
+      distanceText: `${optimized.totalDistance} km`,
+      durationText: `${optimized.estimatedHours} hrs`,
+      orderedStops: optimized.route.map((point) => getPlaceLabel(point)).filter(Boolean),
+    };
+
+    try {
+      setRouteOptimizing(true);
+      const previewResp = await optimizeRoutePreview({
+        origin: normalizeName(origin),
+        destination: normalizeName(destination),
+        stops: stops.map((stop) => normalizeName(stop)).filter(Boolean),
+      });
+
+      const orderedStops = previewResp?.route_overview?.ordered_stops || [];
+      const mapOptimizedRoute = reorderRouteByStopNames(optimized.route, orderedStops);
+
+      if (mapOptimizedRoute.length >= 2) {
+        route = mapOptimizedRoute;
+      }
+
+      if (previewResp?.route_overview?.total_distance || previewResp?.route_overview?.total_duration) {
+        routeMetrics = {
+          source: previewResp?.route_source || 'google_maps',
+          distanceText: previewResp?.route_overview?.total_distance || routeMetrics.distanceText,
+          durationText: previewResp?.route_overview?.total_duration || routeMetrics.durationText,
+          orderedStops: Array.isArray(previewResp?.route_overview?.ordered_stops)
+            ? previewResp.route_overview.ordered_stops
+            : routeMetrics.orderedStops,
+        };
+      }
+    } catch (err) {
+      console.warn('Route optimization preview fallback:', err?.message || err);
+    } finally {
+      setRouteOptimizing(false);
+    }
+
     const journeyRecord = {
       id: Date.now(), createdAt: new Date().toISOString(),
       origin, destination, departureDate, comingDate, budgetRange, selectedExperiences, stops,
-      route: optimized.route, totalDistance: optimized.totalDistance, estimatedHours: optimized.estimatedHours,
+      route,
+      totalDistance: optimized.totalDistance,
+      estimatedHours: optimized.estimatedHours,
+      routeMetrics,
     };
     setResult(journeyRecord);
-    setFinalizedRoute(optimized.route);
+    setFinalizedRoute(route);
     setShowPreviewAddBox(false); setShowPreviewEditBox(false);
     setEditingRouteIndex(null); setEditStopSelection(null);
     setCurrentStep(2);
@@ -492,15 +577,15 @@ export default function AgentHomePage() {
 
   // ── Fetch places on step 4 ──
   useEffect(() => {
-    if (currentStep !== 4 || !result || activeRoute.length === 0) return;
+    if (currentStep !== 4 || !result || previewRouteList.length === 0) return;
     const originName = normalizeName(origin), destinationName = normalizeName(destination);
     const payload = {
       origin: originName, destination: destinationName,
-      stops: deriveRouteStops(activeRoute, originName, destinationName),
+      stops: deriveRouteStops(previewRouteList, originName, destinationName),
       budget: Number(budgetRange?.[1] || 0),
       dates: [departureDate, comingDate].filter(Boolean),
     };
-    const requestKey = JSON.stringify({ route: activeRoute.map((p) => normalizeName(p)), dates: payload.dates, budget: payload.budget });
+    const requestKey = JSON.stringify({ route: previewRouteList.map((p) => normalizeName(p)), dates: payload.dates, budget: payload.budget });
     if (requestKey === placesRequestKey) return;
 
     (async () => {
@@ -512,7 +597,7 @@ export default function AgentHomePage() {
         setDraftTripId(tripId);
         const placeResp = await generatePlaces(tripId);
         const candidates = Array.isArray(placeResp?.places) ? placeResp.places : [];
-        setCheckpointPlaces(groupPlacesByCheckpoint(activeRoute, candidates));
+        setCheckpointPlaces(groupPlacesByCheckpoint(previewRouteList, candidates));
         setPlacesRequestKey(requestKey);
       } catch (err) {
         setPlacesError(err.message || 'Failed to load checkpoint recommendations.');
@@ -520,7 +605,7 @@ export default function AgentHomePage() {
         setPlacesLoading(false);
       }
     })();
-  }, [activeRoute, budgetRange, comingDate, currentStep, departureDate, destination, origin, placesRequestKey, result]);
+  }, [budgetRange, comingDate, currentStep, departureDate, destination, origin, placesRequestKey, previewRouteList, result]);
 
   const hidePlaceCard = (checkpointName, placeName) => {
     const ck = normalizeName(checkpointName), pk = normalizeName(placeName);
@@ -547,6 +632,7 @@ export default function AgentHomePage() {
     setStayPreferences({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
     setCheckpointPlaces({}); setPlacesLoading(false); setPlacesError('');
     setPlacesRequestKey(''); setHiddenPlaces({}); setDraftTripId(''); setItineraryLoading(false);
+    setRouteOptimizing(false);
     setCurrentStep(1);
   };
 
@@ -751,8 +837,8 @@ export default function AgentHomePage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <button type="button" onClick={resetPlanner}
                     className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Cancel</button>
-                  <button type="button" onClick={buildJourney}
-                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110">Continue</button>
+                  <button type="button" onClick={buildJourney} disabled={routeOptimizing}
+                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70">{routeOptimizing ? 'Optimizing Route...' : 'Continue'}</button>
                 </div>
               </div>
             </div>
@@ -848,7 +934,7 @@ export default function AgentHomePage() {
               {/* Route list: drag + Wikipedia thumb + edit/delete */}
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
-                  {activeRoute.map((place, index) => {
+                  {previewRouteList.map((place, index) => {
                     const isCore = getPlaceLabel(place) === getPlaceLabel(origin);
                     const isSelected = finalizedRoute.some((cp) => cp.name === place.name);
                     return (
@@ -898,11 +984,12 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{routeDistanceLabel}</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{routeDurationLabel}</p>
+                <p className="mt-1 text-[0.65rem] uppercase tracking-[0.16em] text-emerald-300">{routeSourceLabel}</p>
               </div>
             </div>
 
@@ -1049,7 +1136,7 @@ export default function AgentHomePage() {
                 </div>
                 {placesError && <p className="mt-2 text-xs text-red-300">{placesError}</p>}
                 <div className="mt-3 max-h-80 space-y-3 overflow-y-auto pr-1">
-                  {activeRoute.map((place, index) => {
+                  {previewRouteList.map((place, index) => {
                     const label = getPlaceLabel(place);
                     const isCore = label === getPlaceLabel(origin) || label === getPlaceLabel(destination);
                     return (
@@ -1083,13 +1170,28 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{routeDistanceLabel}</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{routeDurationLabel}</p>
+                <p className="mt-1 text-[0.65rem] uppercase tracking-[0.16em] text-emerald-300">{routeSourceLabel}</p>
               </div>
             </div>
+
+            {previewRouteList.length <= 2 && (
+              <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                No intermediate checkpoints were added, so Google Maps can only show the origin and destination.
+                Add route checkpoints to enable multi-waypoint optimization.
+              </div>
+            )}
+
+            {previewRouteList.length <= 2 && (
+              <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                No intermediate checkpoints were added, so the final route still shows only origin and destination.
+                Add checkpoints to let Google optimize a multi-stop route.
+              </div>
+            )}
 
             {/* Generated Place Blocks (doc-3) + Wikipedia photo fallback */}
             <section className="mt-5 rounded-2xl border border-slate-700/80 bg-slate-950/55 p-5">
@@ -1103,13 +1205,13 @@ export default function AgentHomePage() {
               {placesError && <p className="mt-2 text-xs text-red-300">{placesError}</p>}
 
               <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {activeRoute.slice(1).map((place, index) => {
+                {previewRouteList.slice(1).map((place, index) => {
                   const label = getPlaceLabel(place);
                   const checkpointKey = normalizeName(label);
                   const relatedPlaces = (checkpointPlaces[checkpointKey] || []).filter(
                     (c) => !hiddenPlaces[checkpointKey]?.[normalizeName(c.name)],
                   );
-                  const isDestination = index === activeRoute.slice(1).length - 1;
+                  const isDestination = index === previewRouteList.slice(1).length - 1;
 
                   return (
                     <div key={`${checkpointKey}-${index}`} className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">

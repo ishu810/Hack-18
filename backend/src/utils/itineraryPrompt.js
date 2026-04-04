@@ -1,6 +1,9 @@
-export const buildItineraryPrompt = ({ origin, destination, days: tripDays, selectedPlaces, budget, dates }) => {
+export const buildItineraryPrompt = ({ origin, destination, days: tripDays, selectedPlaces, budget, dates, routePlan }) => {
   const placesText = selectedPlaces.map(p => `${p.name} (${p.location})`).join(', ');
   const dateRange = dates.length > 0 ? `from ${dates[0]} to ${dates[dates.length - 1]}` : '';
+  const routePlanText = routePlan
+    ? JSON.stringify(routePlan, null, 2)
+    : 'Not available';
   
   return `You are a professional travel planner. Create a detailed, day-wise itinerary for a trip.
 
@@ -10,6 +13,9 @@ TRIP DETAILS:
 - Selected Places: ${placesText}
 - Duration: ${tripDays} day(s) ${dateRange}
 - Budget: ₹${budget}
+
+ROUTE PLAN FROM GOOGLE MAPS:
+${routePlanText}
 
 INSTRUCTIONS (Be CONCISE to minimize tokens - use bullet points, short descriptions):
 Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, include:
@@ -26,6 +32,7 @@ Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, inc
 10. Summary: 1 line summarizing the day
 
 MANDATORY SEQUENCING RULES (VERY IMPORTANT):
+- Follow the ROUTE PLAN order when it is available.
 - If day city is different from previous day city, travel MUST be present and explicit.
 - Write travel clearly as: from: "Previous City", to: "Current City".
 - On transfer days, first activity title MUST start with: "After reaching <Current City>, ...".
@@ -38,6 +45,7 @@ IMPORTANT:
 - Use simple, readable format.
 - Keep each field brief to save tokens.
 - Distribute selected places across days reasonably.
+- Travel duration must be realistic and reflect actual distance between locations.
 
 RESPONSE FORMAT (STRICTLY follow this JSON structure):
 {
