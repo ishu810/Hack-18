@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { computeRoute } from '../api';
 import PlacesMap from '../components/PlacesMap';
 import { optimizeDayPlaces } from '../utils/dayRouteOptimizer';
+import { buildRouteMetrics, formatDistance } from '../utils/routeMath';
 
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
 const SNAPSHOT_KEY = 'itinerary-planner:snapshot:v1';
@@ -116,6 +118,24 @@ function formatTransit(travel) {
   return `${travel.from} -> ${travel.to}${mode}${duration}`;
 }
 
+function formatMinutes(minutes = 0) {
+  const rounded = Math.max(1, Math.round(Number(minutes) || 0));
+  if (rounded >= 60) {
+    const hours = rounded / 60;
+    return `${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} hrs`;
+  }
+  return `${rounded} min`;
+}
+
+function getSegmentTransitLabel(segment) {
+  if (!segment) return 'Transit time unavailable';
+  const minutes = Number(segment?.estimatedMinutes || segment?.durationMinutes || 0);
+  const distanceMeters = Number(segment?.distanceMeters || 0);
+  const timeLabel = minutes > 0 ? formatMinutes(minutes) : 'time unavailable';
+  const distanceLabel = distanceMeters > 0 ? formatDistance(distanceMeters) : 'distance unavailable';
+  return `${timeLabel} • ${distanceLabel}`;
+}
+
 export default function ItineraryPlannerPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -134,6 +154,9 @@ export default function ItineraryPlannerPage() {
   const [focusedPlaceName, setFocusedPlaceName] = useState('');
   const [resolvedRoutePlaces, setResolvedRoutePlaces] = useState([]);
   const [resolvedDayActivityPlaces, setResolvedDayActivityPlaces] = useState([]);
+  const [routeSegments, setRouteSegments] = useState([]);
+  const [selectedRouteSegmentIndex, setSelectedRouteSegmentIndex] = useState(null);
+  const [selectedRouteSegment, setSelectedRouteSegment] = useState(null);
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
   const [routeError, setRouteError] = useState('');
   const [toast, setToast] = useState(null);
@@ -338,6 +361,67 @@ export default function ItineraryPlannerPage() {
 
     return optimizeDayPlaces(matched.length ? matched : dayCityPlaces);
   }, [activeDay, resolvedDayActivityPlaces, selectedPlaces]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveRouteSegments = async () => {
+      const routePoints = (activeDayRoutePlaces || []).filter((place) => {
+        const lat = Number(place?.lat);
+        const lng = Number(place?.lng ?? place?.lon);
+        return Number.isFinite(lat) && Number.isFinite(lng);
+      });
+
+      if (routePoints.length < 2) {
+        setRouteSegments([]);
+        setSelectedRouteSegmentIndex(null);
+        setSelectedRouteSegment(null);
+        return;
+      }
+
+      const nextSegments = await Promise.all(routePoints.slice(0, -1).map(async (from, index) => {
+        const to = routePoints[index + 1];
+        const response = await computeRoute({
+          waypoints: [
+            { lat: Number(from.lat), lng: Number(from.lng ?? from.lon) },
+            { lat: Number(to.lat), lng: Number(to.lng ?? to.lon) },
+          ],
+          mode: 'drive',
+          options: {},
+        });
+
+        const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
+        return {
+          index,
+          fromName: from?.name || `Stop ${index + 1}`,
+          toName: to?.name || `Stop ${index + 2}`,
+          points: metrics.polyline.length > 1
+            ? metrics.polyline
+            : [
+                [Number(from.lat), Number(from.lng ?? from.lon)],
+                [Number(to.lat), Number(to.lng ?? to.lon)],
+              ],
+          distanceMeters: metrics.distanceMeters,
+          distanceKm: metrics.distanceKm,
+          estimatedMinutes: metrics.estimatedMinutes,
+          durationMinutes: metrics.durationMinutes,
+          averageSpeedKmh: metrics.averageSpeedKmh,
+        };
+      }));
+
+      if (cancelled) return;
+
+      setRouteSegments(nextSegments);
+      setSelectedRouteSegmentIndex(nextSegments.length ? 0 : null);
+      setSelectedRouteSegment(nextSegments[0] || null);
+    };
+
+    resolveRouteSegments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDayRoutePlaces, routeRefreshToken]);
 
   const removeSinglePlaceInstance = (activity, dayCity) => {
     const used = new Set();
@@ -629,6 +713,13 @@ export default function ItineraryPlannerPage() {
               <PlacesMap
                 places={mapPlaces}
                 routePlaces={activeDayRoutePlaces}
+                routeSegments={routeSegments}
+                selectedRouteSegmentIndex={selectedRouteSegmentIndex}
+                onRouteSegmentClick={(segment, index) => {
+                  setSelectedRouteSegmentIndex(index);
+                  setSelectedRouteSegment(segment);
+                  setFocusedPlaceName(segment?.fromName || segment?.toName || '');
+                }}
                 className="h-96"
                 showRoute
                 originName={journey?.origin?.name || journey?.origin || ''}
@@ -650,6 +741,21 @@ export default function ItineraryPlannerPage() {
                 </button>
                 {routeError ? <span className="text-amber-200/90">{routeError}</span> : <span className="text-slate-500">Active day route</span>}
               </div>
+              {selectedRouteSegment ? (
+                <div className="rounded-xl border border-slate-700 bg-slate-950/80 px-3 py-3 text-sm text-slate-200">
+                  <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Selected connection</p>
+                  <p className="mt-1 font-semibold text-amber-100">
+                    {selectedRouteSegment.fromName} → {selectedRouteSegment.toName}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-300">
+                    <span>Distance: {formatDistance(selectedRouteSegment.distanceMeters)}</span>
+                    <span>Avg time: {formatMinutes(selectedRouteSegment.estimatedMinutes || selectedRouteSegment.durationMinutes)}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">Click a different line segment to inspect another stop-to-stop connection.</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">Click the line connecting two places to see the distance and average travel time.</p>
+              )}
               <div className="mt-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Mapped Stops</p>
                 <ul className="mt-2 space-y-2 text-sm text-slate-300">
@@ -724,6 +830,13 @@ export default function ItineraryPlannerPage() {
                             </div>
                             <p className="mt-1 text-xs text-slate-400">{activity.location || day.city}</p>
                             {activity.description ? <p className="mt-1 text-sm text-slate-300">{activity.description}</p> : null}
+
+                            {index === activeDayIndex && activityIndex < (day.activities || []).length - 1 ? (
+                              <div className="mt-2 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
+                                <span className="font-semibold uppercase tracking-[0.12em]">Transit to next stop</span>
+                                <p className="mt-1">{getSegmentTransitLabel(routeSegments[activityIndex])}</p>
+                              </div>
+                            ) : null}
                           </li>
                         ))}
                       </ol>

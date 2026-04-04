@@ -3,6 +3,7 @@ import { MapContainer, Marker, Popup, TileLayer, Tooltip, useMap } from 'react-l
 import L from 'leaflet';
 import { computeRoute } from '../api';
 import MapRouteLayer from './MapRouteLayer';
+import { buildRouteMetrics, formatDistance } from '../utils/routeMath';
 import 'leaflet/dist/leaflet.css';
 
 delete L.Icon.Default.prototype._getIconUrl;
@@ -152,7 +153,7 @@ function LegendCard() {
   ];
 
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 z-500 rounded-xl border border-slate-300/40 bg-white/90 px-3 py-2 text-xs text-slate-800 shadow-lg">
+    <div className="pointer-events-none absolute bottom-3 left-3 z-50 rounded-xl border border-slate-300/40 bg-white/90 px-3 py-2 text-xs text-slate-800 shadow-lg">
       {items.map((item) => (
         <div key={item.label} className="flex items-center gap-2 py-0.5">
           <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
@@ -163,9 +164,22 @@ function LegendCard() {
   );
 }
 
+function formatDurationLabel(minutes = 0) {
+  const rounded = Math.max(1, Math.round(Number(minutes) || 0));
+  if (rounded < 60) {
+    return `${rounded} min`;
+  }
+
+  const hours = rounded / 60;
+  return `${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} hrs`;
+}
+
 export default function PlacesMap({
   places = [],
   routePlaces = [],
+  routeSegments = [],
+  selectedRouteSegmentIndex = null,
+  onRouteSegmentClick = null,
   className = 'h-96',
   showRoute = true,
   originName = '',
@@ -180,6 +194,7 @@ export default function PlacesMap({
   routeDebounceMs = 300,
   fitSignal = 'initial',
   onRouteError = null,
+  onRouteComputed = null,
 }) {
   const validPlaces = useMemo(() => {
     const merged = [...(routePlaces || []), ...(places || [])];
@@ -201,10 +216,7 @@ export default function PlacesMap({
   const destinationKey = normalizeName(destinationName);
   const focusedKey = normalizeName(focusPlaceName);
 
-  const points = useMemo(
-    () => validPlaces.map((place) => toLatLng(place)),
-    [validPlaces],
-  );
+  const points = useMemo(() => validPlaces.map((place) => toLatLng(place)), [validPlaces]);
 
   const routeInputPoints = useMemo(() => {
     const preferred = (routePlaces || []).map((place) => toLatLng(place)).filter(Boolean);
@@ -215,7 +227,18 @@ export default function PlacesMap({
   }, [routePlaces, validPlaces]);
 
   const [routePoints, setRoutePoints] = useState([]);
-  const localRouteCacheRef = useRef(new Map());
+  const [routeStats, setRouteStats] = useState({
+    distanceMeters: 0,
+    distanceKm: 0,
+    durationSeconds: 0,
+    durationMinutes: 0,
+    estimatedMinutes: 0,
+    averageSpeedKmh: 0,
+    legs: [],
+    polyline: [],
+    provider: null,
+  });
+  const routeCacheRef = useRef(new Map());
   const requestSeqRef = useRef(0);
   const lastRefreshTokenRef = useRef(routeRefreshToken);
   const routeInputHash = useMemo(
@@ -226,6 +249,17 @@ export default function PlacesMap({
   useEffect(() => {
     if (!showRoute || routeInputPoints.length < 2) {
       setRoutePoints([]);
+      setRouteStats({
+        distanceMeters: 0,
+        distanceKm: 0,
+        durationSeconds: 0,
+        durationMinutes: 0,
+        estimatedMinutes: 0,
+        averageSpeedKmh: 0,
+        legs: [],
+        polyline: [],
+        provider: null,
+      });
       return undefined;
     }
 
@@ -233,9 +267,14 @@ export default function PlacesMap({
     lastRefreshTokenRef.current = routeRefreshToken;
 
     if (!forceRefresh) {
-      const cached = localRouteCacheRef.current.get(routeInputHash);
-      if (cached && Array.isArray(cached) && cached.length > 1) {
-        setRoutePoints(cached);
+      const cached = routeCacheRef.current.get(routeInputHash);
+      if (cached?.polyline?.length > 1) {
+        const cachedMetrics = buildRouteMetrics(cached, routeMode, routeOptions);
+        setRoutePoints(cachedMetrics.polyline);
+        setRouteStats(cachedMetrics);
+        if (typeof onRouteComputed === 'function') {
+          onRouteComputed(cachedMetrics);
+        }
         return undefined;
       }
     }
@@ -255,18 +294,48 @@ export default function PlacesMap({
         if (seq !== requestSeqRef.current) return;
 
         if (response?.success && Array.isArray(response?.route?.polyline) && response.route.polyline.length > 1) {
-          localRouteCacheRef.current.set(routeInputHash, response.route.polyline);
-          setRoutePoints(response.route.polyline);
+          routeCacheRef.current.set(routeInputHash, response.route);
+          const nextStats = buildRouteMetrics(response.route, routeMode, routeOptions);
+          setRoutePoints(nextStats.polyline);
+          setRouteStats(nextStats);
+          if (typeof onRouteComputed === 'function') {
+            onRouteComputed(nextStats);
+          }
           return;
         }
 
         setRoutePoints(routeInputPoints);
+        setRouteStats({
+          distanceMeters: 0,
+          distanceKm: 0,
+          durationSeconds: 0,
+          durationMinutes: 0,
+          estimatedMinutes: 0,
+          averageSpeedKmh: 0,
+          legs: [],
+          polyline: routeInputPoints,
+          provider: null,
+        });
+
         if (typeof onRouteError === 'function') {
           onRouteError(response?.error || { message: 'Routing service returned no route polyline.' });
         }
       } catch (error) {
         if (seq !== requestSeqRef.current) return;
+
         setRoutePoints(routeInputPoints);
+        setRouteStats({
+          distanceMeters: 0,
+          distanceKm: 0,
+          durationSeconds: 0,
+          durationMinutes: 0,
+          estimatedMinutes: 0,
+          averageSpeedKmh: 0,
+          legs: [],
+          polyline: routeInputPoints,
+          provider: null,
+        });
+
         if (typeof onRouteError === 'function') {
           onRouteError({
             code: 'ROUTE_FETCH_FAILED',
@@ -279,12 +348,28 @@ export default function PlacesMap({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [onRouteError, routeDebounceMs, routeInputHash, routeInputPoints, routeMode, routeOptions, routeRefreshToken, showRoute]);
+  }, [onRouteComputed, onRouteError, routeDebounceMs, routeInputHash, routeInputPoints, routeMode, routeOptions, routeRefreshToken, showRoute]);
 
-  const fitPoints = routePoints.length > 1 ? routePoints : points;
+  const routeLayerSegments = useMemo(() => (Array.isArray(routeSegments) ? routeSegments : []), [routeSegments]);
+
+  const routeLayerPoints = useMemo(() => {
+    if (routeLayerSegments.length > 0) {
+      return routeLayerSegments.flatMap((segment) => (Array.isArray(segment?.points) ? segment.points : [])).filter(Boolean);
+    }
+
+    return routePoints;
+  }, [routeLayerSegments, routePoints]);
+
+  const fitPoints = routeLayerPoints.length > 1 ? routeLayerPoints : points;
+  const routeDistanceLabel = routeStats.distanceMeters > 0 ? formatDistance(routeStats.distanceMeters) : null;
+  const routeTimeLabel = routeStats.estimatedMinutes > 0
+    ? formatDurationLabel(routeStats.estimatedMinutes)
+    : routeStats.durationMinutes > 0
+      ? formatDurationLabel(routeStats.durationMinutes)
+      : null;
 
   return (
-    <div className={`overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70 ${className}`}>
+    <div className={`relative overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70 ${className}`}>
       <MapContainer center={getBoundsCenter(points)} zoom={points.length ? 8 : 5} className="h-full w-full" scrollWheelZoom>
         <TileLayer
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
@@ -295,7 +380,14 @@ export default function PlacesMap({
         <MapAutoFit points={fitPoints} fitSignal={fitSignal} />
         <FocusPlace focusPlaceName={focusPlaceName} places={validPlaces} />
 
-        <MapRouteLayer points={routePoints} />
+        {showRoute ? (
+          <MapRouteLayer
+            points={routePoints}
+            segments={routeLayerSegments}
+            selectedSegmentIndex={selectedRouteSegmentIndex}
+            onSegmentClick={onRouteSegmentClick}
+          />
+        ) : null}
 
         {userLocation && Number.isFinite(Number(userLocation?.lat)) && Number.isFinite(Number(userLocation?.lng)) ? (
           <Marker
@@ -360,9 +452,14 @@ export default function PlacesMap({
             </Marker>
           );
         })}
+
+        <LegendCard />
       </MapContainer>
 
-      <LegendCard />
+      <div className="flex items-center justify-between gap-3 border-t border-slate-700 bg-slate-950/80 px-3 py-2 text-xs text-slate-300">
+        <span>{routeDistanceLabel ? `Route distance: ${routeDistanceLabel}` : 'Route distance: calculating'}</span>
+        <span>{routeTimeLabel ? `Avg time: ${routeTimeLabel}` : 'Avg time: calculating'}</span>
+      </div>
     </div>
   );
 }

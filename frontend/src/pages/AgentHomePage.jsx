@@ -4,8 +4,9 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
+import { computeRoute, createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
 import PlacesMap from '../components/PlacesMap';
+import { buildRouteMetrics } from '../utils/routeMath';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -22,37 +23,71 @@ const DUMMY_NIGHTS_PATTERN = [2, 1, 3, 2, 1, 2];
 
 // ─── Wikipedia Photo Helpers ───────────────────────────────────────────────────
 
-async function fetchWikipediaPhoto(locationName) {
+async function fetchWikipediaPhoto(locationName, searchHint = '') {
+  const buildQueries = (name, hint) => {
+    const base = String(name || '').split(',')[0].trim();
+    const extra = String(hint || '').split(',')[0].trim();
+    return [...new Set([
+      `${base} ${extra}`.trim(),
+      `${base} tourism`.trim(),
+      `${base} landmark`.trim(),
+      base,
+      extra,
+    ].filter(Boolean))];
+  };
+
   try {
     const simpleName = locationName.split(',')[0].trim();
-    const encoded = encodeURIComponent(simpleName);
+    const hintName = String(searchHint || '').split(',')[0].trim();
 
-    // 1. Try direct page summary
-    const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encoded}`);
-    const data = await res.json();
-    if (data.thumbnail?.source) return data.thumbnail.source;
+    for (const query of buildQueries(simpleName, hintName)) {
+      // 1. Try direct page summary
+      const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
+      const data = await res.json();
+      if (data.thumbnail?.source) return data.thumbnail.source;
+    }
 
     // 2. Fallback: search API
-    const searchRes = await fetch(
-      `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encoded}&format=json&origin=*`
-    );
-    const searchData = await searchRes.json();
-    const topTitle = searchData.query?.search?.[0]?.title;
-    if (!topTitle) return null;
+    for (const query of buildQueries(simpleName, hintName)) {
+      const searchRes = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`
+      );
+      const searchData = await searchRes.json();
+      const topTitle = searchData.query?.search?.[0]?.title;
+      if (!topTitle) continue;
 
-    const finalRes = await fetch(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`
-    );
-    const finalData = await finalRes.json();
-    return finalData.thumbnail?.source || null;
+      const finalRes = await fetch(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`
+      );
+      const finalData = await finalRes.json();
+      if (finalData.thumbnail?.source) return finalData.thumbnail.source;
+    }
   } catch {
-    return null;
+    try {
+      const simpleName = locationName.split(',')[0].trim();
+      const hintName = String(searchHint || '').split(',')[0].trim();
+
+      for (const query of buildQueries(simpleName, hintName)) {
+        const commonsRes = await fetch(
+          `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&prop=imageinfo&iiprop=url&iiurlwidth=900&format=json&origin=*`,
+        );
+        const commonsData = await commonsRes.json();
+        const pages = commonsData?.query?.pages || {};
+        const firstPage = Object.values(pages)[0];
+        const imageUrl = firstPage?.imageinfo?.[0]?.thumburl || firstPage?.imageinfo?.[0]?.url || null;
+        if (imageUrl) return imageUrl;
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 }
 
 // ─── LocationPhoto Component ───────────────────────────────────────────────────
 
-function LocationPhoto({ placeName, className = '' }) {
+function LocationPhoto({ placeName, searchHint = '', className = '' }) {
   const [photoUrl, setPhotoUrl] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -60,11 +95,11 @@ function LocationPhoto({ placeName, className = '' }) {
     if (!placeName) { setLoading(false); return; }
     setLoading(true);
     setPhotoUrl(null);
-    fetchWikipediaPhoto(placeName).then((url) => {
+    fetchWikipediaPhoto(placeName, searchHint).then((url) => {
       setPhotoUrl(url);
       setLoading(false);
     });
-  }, [placeName]);
+  }, [placeName, searchHint]);
 
   if (loading) return <div className={`animate-pulse rounded-xl bg-slate-800 ${className}`} />;
   if (!photoUrl) return (
@@ -181,6 +216,20 @@ function findBestRoute(origin, destination, stops) {
   return { route: ordered, totalDistance: Math.round(total), estimatedHours: Math.max(1, Math.round(total / 780)) };
 }
 
+function formatDurationFromMinutes(totalMinutes = 0) {
+  const mins = Math.max(1, Math.round(Number(totalMinutes) || 0));
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem ? `${hours}h ${rem}m` : `${hours}h`;
+}
+
+function buildWaypointHash(points = []) {
+  return points
+    .map((point) => `${Number(point?.lat).toFixed(5)},${Number(point?.lng).toFixed(5)}`)
+    .join('|');
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
 export default function AgentHomePage() {
@@ -210,6 +259,9 @@ export default function AgentHomePage() {
   const [hiddenPlaces, setHiddenPlaces] = useState({});
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [liveRouteMetrics, setLiveRouteMetrics] = useState(null);
+  const [liveRouteMetricsLoading, setLiveRouteMetricsLoading] = useState(false);
 
   // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
@@ -280,15 +332,62 @@ export default function AgentHomePage() {
   const availablePreviewStopOptions = previewStopSuggestions.filter((p) => !previewSelectedNames.has(p.name));
   const occupiedEditNames = new Set(activeRoute.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
   const availableEditStopOptions = editStopSuggestions.filter((p) => !occupiedEditNames.has(p.name));
-  const routeMapPoints = activeRoute
+  const routeMapPoints = useMemo(() => activeRoute
     .map((p) => ({
       ...p,
       lat: Number(p?.lat),
       lng: Number(p?.lng ?? p?.lon),
     }))
-    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-  const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)), [activeRoute]);
+  const routeMapPath = useMemo(() => routeMapPoints.map((p) => [p.lat, p.lng]), [routeMapPoints]);
+  const routeWaypointHash = useMemo(() => buildWaypointHash(routeMapPoints), [routeMapPoints]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
+
+  useEffect(() => {
+    if (!result || routeMapPoints.length < 2) {
+      setLiveRouteMetrics(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        setLiveRouteMetricsLoading(true);
+        const response = await computeRoute({
+          waypoints: routeMapPoints.map((point) => ({ lat: point.lat, lng: point.lng })),
+          mode: 'drive',
+          options: {},
+        });
+
+        if (cancelled) return;
+        const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
+        if (metrics.distanceKm > 0 || metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0) {
+          setLiveRouteMetrics(metrics);
+        }
+      } catch {
+        if (!cancelled) {
+          setLiveRouteMetrics(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLiveRouteMetricsLoading(false);
+        }
+      }
+    }, 280);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [result, routeWaypointHash, routeMapPoints]);
+
+  const effectiveDistanceKm = liveRouteMetrics?.distanceKm > 0
+    ? Math.max(1, Math.round(liveRouteMetrics.distanceKm))
+    : Number(result?.totalDistance || 0);
+  const effectiveMinutes = liveRouteMetrics?.estimatedMinutes || liveRouteMetrics?.durationMinutes || 0;
+  const effectiveDurationLabel = effectiveMinutes > 0
+    ? formatDurationFromMinutes(effectiveMinutes)
+    : `${Math.max(1, Number(result?.estimatedHours || 1))} hrs`;
 
   const getNightLabel = (place, index) => {
     const n = Number(place?.nights);
@@ -388,23 +487,60 @@ export default function AgentHomePage() {
   };
 
   // ── Build journey ──
-  const buildJourney = () => {
+  const buildJourney = async () => {
     setError(''); setPlacesError(''); setCheckpointPlaces({}); setPlacesRequestKey(''); setHiddenPlaces({});
     if (!origin || !destination) { setError('Select valid start and destination cities from suggestions.'); return; }
     if (origin.name === destination.name) { setError('Origin and destination must be different.'); return; }
     if (!departureDate || !comingDate) { setError('Please add both departure and coming dates.'); return; }
     if (new Date(comingDate) < new Date(departureDate)) { setError('Coming date must be after departure date.'); return; }
     const optimized = findBestRoute(origin, destination, stops);
-    const journeyRecord = {
-      id: Date.now(), createdAt: new Date().toISOString(),
-      origin, destination, departureDate, comingDate, budgetRange, stops,
-      route: optimized.route, totalDistance: optimized.totalDistance, estimatedHours: optimized.estimatedHours,
-    };
-    setResult(journeyRecord);
-    setFinalizedRoute(optimized.route);
-    setShowPreviewAddBox(false); setShowPreviewEditBox(false);
-    setEditingRouteIndex(null); setEditStopSelection(null);
-    setCurrentStep(2);
+    setRouteLoading(true);
+
+    try {
+      const response = await computeRoute({
+        waypoints: optimized.route.map((place) => ({
+          lat: Number(place?.lat),
+          lng: Number(place?.lng ?? place?.lon),
+        })),
+        mode: 'drive',
+        options: {},
+      });
+
+      const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
+      const totalDistance = metrics.distanceKm > 0 ? Math.max(1, Math.round(metrics.distanceKm)) : optimized.totalDistance;
+      const estimatedHours = (metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0)
+        ? Math.max(1, Math.round((metrics.estimatedMinutes || metrics.durationMinutes) / 60))
+        : optimized.estimatedHours;
+
+      const journeyRecord = {
+        id: Date.now(), createdAt: new Date().toISOString(),
+        origin, destination, departureDate, comingDate, budgetRange, stops,
+        route: optimized.route,
+        routeMetrics: metrics,
+        totalDistance,
+        estimatedHours,
+      };
+
+      setResult(journeyRecord);
+      setFinalizedRoute(optimized.route);
+      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
+      setEditingRouteIndex(null); setEditStopSelection(null);
+      setCurrentStep(2);
+    } catch {
+      const journeyRecord = {
+        id: Date.now(), createdAt: new Date().toISOString(),
+        origin, destination, departureDate, comingDate, budgetRange, stops,
+        route: optimized.route, totalDistance: optimized.totalDistance, estimatedHours: optimized.estimatedHours,
+      };
+
+      setResult(journeyRecord);
+      setFinalizedRoute(optimized.route);
+      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
+      setEditingRouteIndex(null); setEditStopSelection(null);
+      setCurrentStep(2);
+    } finally {
+      setRouteLoading(false);
+    }
   };
 
   // ── Checkpoint toggle ──
@@ -733,8 +869,8 @@ export default function AgentHomePage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <button type="button" onClick={resetPlanner}
                     className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Cancel</button>
-                  <button type="button" onClick={buildJourney}
-                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110">Continue</button>
+                  <button type="button" onClick={buildJourney} disabled={routeLoading}
+                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70">{routeLoading ? 'Calculating Route...' : 'Continue'}</button>
                 </div>
               </div>
             </div>
@@ -842,7 +978,7 @@ export default function AgentHomePage() {
                         className={`w-full rounded-xl border px-4 py-3 text-left transition ${isSelected ? 'border-amber-300/50 bg-amber-300/10' : 'border-slate-700 bg-slate-950/45 opacity-60 hover:border-amber-300/40 hover:opacity-100'} ${isCore ? 'cursor-default' : 'cursor-move'}`}>
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex min-w-0 flex-1 items-center gap-3">
-                            <LocationPhoto placeName={getPlaceLabel(place)} className="h-10 w-14 shrink-0 rounded-lg" />
+                            <LocationPhoto placeName={getPlaceLabel(place)} searchHint={place.location || getPlaceLabel(destination)} className="h-10 w-14 shrink-0 rounded-lg" />
                             <div className="min-w-0">
                               <p className={`truncate text-sm font-medium ${isSelected ? 'text-slate-100' : 'text-slate-400'}`}>{getPlaceLabel(place)}</p>
                               <p className="text-[0.68rem] uppercase tracking-[0.16em] text-slate-500">Stay: {getNightLabel(place, index)}</p>
@@ -887,11 +1023,12 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
+                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
               </div>
             </div>
 
@@ -978,7 +1115,7 @@ export default function AgentHomePage() {
                     return (
                       <div key={`${label}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-950/45 px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <LocationPhoto placeName={label} className="h-10 w-14 shrink-0 rounded-lg" />
+                          <LocationPhoto placeName={label} searchHint={label} className="h-10 w-14 shrink-0 rounded-lg" />
                           <span className="h-3 w-3 shrink-0 rounded-full bg-amber-300" />
                           <span className="text-sm font-medium text-slate-100">{label}</span>
                           {isCore && <span className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-500">Required</span>}
@@ -1006,11 +1143,12 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
+                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
               </div>
             </div>
 
@@ -1068,7 +1206,7 @@ export default function AgentHomePage() {
                               <img src={candidate.imageUrl} alt={candidate.name || 'Place image'}
                                 className="mt-2 h-44 w-full object-cover" loading="lazy" />
                             ) : (
-                              <LocationPhoto placeName={candidate.name} className="mt-2 h-44 w-full rounded-none" />
+                              <LocationPhoto placeName={candidate.name} searchHint={candidate.location} className="mt-2 h-44 w-full rounded-none" />
                             )}
 
                             <div className="p-3 pt-3">

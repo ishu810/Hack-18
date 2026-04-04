@@ -54,6 +54,255 @@ const toFiniteNumber = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const toRad = (value) => (value * Math.PI) / 180;
+
+const distanceKm = (a, b) => {
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const val = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(val), Math.sqrt(1 - val));
+};
+
+const getPlaceCoords = (place) => {
+  const lat = toFiniteNumber(place?.lat);
+  const lng = toFiniteNumber(place?.lng ?? place?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+};
+
+const splitEvenly = (items = [], parts = 1) => {
+  const count = Math.max(1, Number(parts) || 1);
+  const buckets = Array.from({ length: count }, () => []);
+  if (!items.length) return buckets;
+
+  items.forEach((item, index) => {
+    buckets[index % count].push(item);
+  });
+
+  return buckets;
+};
+
+const orderPlacesByNearest = (places = []) => {
+  if (!Array.isArray(places) || places.length <= 2) return [...places];
+
+  const remaining = [...places];
+  const ordered = [remaining.shift()];
+
+  while (remaining.length) {
+    const current = ordered[ordered.length - 1];
+    const currentCoords = getPlaceCoords(current);
+    if (!currentCoords) {
+      ordered.push(remaining.shift());
+      continue;
+    }
+
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    remaining.forEach((candidate, index) => {
+      const candidateCoords = getPlaceCoords(candidate);
+      if (!candidateCoords) return;
+      const dist = distanceKm(currentCoords, candidateCoords);
+      if (dist < nearestDistance) {
+        nearestDistance = dist;
+        nearestIndex = index;
+      }
+    });
+
+    ordered.push(remaining.splice(nearestIndex, 1)[0]);
+  }
+
+  return ordered;
+};
+
+const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
+  const days = Math.max(1, Number(tripDays) || 1);
+  const input = Array.isArray(selectedPlaces) ? [...selectedPlaces] : [];
+  const withCoords = input.filter((place) => getPlaceCoords(place));
+
+  if (!withCoords.length) {
+    const groupedNoCoords = splitEvenly(input, days);
+    return {
+      groupedPlacesByDay: groupedNoCoords,
+      orderedPlaces: groupedNoCoords.flat(),
+    };
+  }
+
+  const targetPerDay = Math.max(1, Math.ceil(withCoords.length / days));
+  const unassigned = [...withCoords];
+  const grouped = Array.from({ length: days }, () => []);
+
+  for (let dayIndex = 0; dayIndex < days && unassigned.length; dayIndex += 1) {
+    const dayPlaces = [];
+    let current = unassigned.shift();
+    dayPlaces.push(current);
+
+    while (unassigned.length && dayPlaces.length < targetPerDay) {
+      const currentCoords = getPlaceCoords(current);
+      if (!currentCoords) {
+        current = unassigned.shift();
+        dayPlaces.push(current);
+        continue;
+      }
+
+      let nearestIdx = -1;
+      let nearestDist = Infinity;
+      unassigned.forEach((candidate, index) => {
+        const candidateCoords = getPlaceCoords(candidate);
+        if (!candidateCoords) return;
+        const dist = distanceKm(currentCoords, candidateCoords);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestIdx = index;
+        }
+      });
+
+      const remainingDays = Math.max(0, days - dayIndex - 1);
+      const adaptiveLimitKm = dayPlaces.length === 1 ? 55 : 40;
+      const shouldBreakForDistance = nearestDist > adaptiveLimitKm && unassigned.length > remainingDays;
+
+      if (nearestIdx < 0 || shouldBreakForDistance) break;
+
+      current = unassigned.splice(nearestIdx, 1)[0];
+      dayPlaces.push(current);
+    }
+
+    grouped[dayIndex] = orderPlacesByNearest(dayPlaces);
+  }
+
+  while (unassigned.length) {
+    let bestDay = 0;
+    let bestDistance = Infinity;
+    const candidate = unassigned.shift();
+    const candidateCoords = getPlaceCoords(candidate);
+
+    grouped.forEach((dayPlaces, dayIndex) => {
+      if (!dayPlaces.length) {
+        bestDay = dayIndex;
+        bestDistance = -1;
+        return;
+      }
+
+      if (!candidateCoords) return;
+      const anchorCoords = getPlaceCoords(dayPlaces[dayPlaces.length - 1]);
+      if (!anchorCoords) return;
+
+      const dist = distanceKm(candidateCoords, anchorCoords);
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        bestDay = dayIndex;
+      }
+    });
+
+    grouped[bestDay].push(candidate);
+    grouped[bestDay] = orderPlacesByNearest(grouped[bestDay]);
+  }
+
+  const groupedPlacesByDay = grouped.map((dayPlaces) => [...dayPlaces]);
+  return {
+    groupedPlacesByDay,
+    orderedPlaces: groupedPlacesByDay.flat(),
+  };
+};
+
+const scorePlaceForSelection = (place = {}) => {
+  const popularity = Number(place?.popularity) || 0;
+  const rating = Number(place?.rating) || 0;
+  const name = normalizePlaceName(place?.name);
+  const type = normalizePlaceName(place?.type);
+
+  const highPriorityTerms = [
+    'taj mahal', 'fort', 'palace', 'lake', 'heritage', 'temple', 'monument', 'castle',
+    'viewpoint', 'ghat', 'jagdish', 'sajjangarh', 'city palace', 'lake pichola', 'bagore',
+    'haveli', 'museum', 'old city',
+  ];
+
+  const mediumPriorityTerms = ['garden', 'park', 'market', 'memorial', 'hill', 'biological', 'wildlife'];
+  const genericPenaltyTerms = ['foundation', 'institute', 'office', 'residence', 'residential', 'school', 'university', 'park'];
+
+  const highPriorityBonus = highPriorityTerms.reduce((bonus, term) => (
+    name.includes(term) || type.includes(term) ? bonus + 34 : bonus
+  ), 0);
+
+  const mediumPriorityBonus = mediumPriorityTerms.reduce((bonus, term) => (
+    name.includes(term) || type.includes(term) ? bonus + 10 : bonus
+  ), 0);
+
+  const genericPenalty = genericPenaltyTerms.reduce((penalty, term) => (
+    name.includes(term) || type.includes(term) ? penalty - 16 : penalty
+  ), 0);
+
+  return (popularity * 1.2) + (rating * 2.4) + highPriorityBonus + mediumPriorityBonus + genericPenalty;
+};
+
+const sortPlacesBySelectionScore = (places = []) => [...places].sort((a, b) => {
+  const scoreDelta = scorePlaceForSelection(b) - scorePlaceForSelection(a);
+  if (scoreDelta !== 0) return scoreDelta;
+  const locationDelta = normalizePlaceName(a?.location).localeCompare(normalizePlaceName(b?.location));
+  if (locationDelta !== 0) return locationDelta;
+  return normalizePlaceName(a?.name).localeCompare(normalizePlaceName(b?.name));
+});
+
+const buildStrictShortlist = (candidates = [], destination = '', days = 1) => {
+  const destinationKey = normalizePlaceName(destination);
+  const intermediateKeys = [...new Set(
+    candidates
+      .map((item) => normalizePlaceName(item?.location))
+      .filter((loc) => loc && loc !== destinationKey)
+  )];
+
+  const destinationCap = days === 3 ? 5 : Math.max(2, Math.min(5, days + 2));
+  const perIntermediateCap = 2;
+
+  const shortlist = [];
+  const seen = new Set();
+
+  const takeTop = (items = [], cap = Infinity) => {
+    let taken = 0;
+    for (const item of sortPlacesBySelectionScore(items)) {
+      const key = `${normalizePlaceName(item?.name)}|${normalizePlaceName(item?.location)}`;
+      if (!item?.name || seen.has(key)) continue;
+      seen.add(key);
+      shortlist.push(item);
+      taken += 1;
+      if (taken >= cap) break;
+    }
+  };
+
+  takeTop(candidates.filter((item) => normalizePlaceName(item?.location) === destinationKey), destinationCap);
+
+  for (const locationKey of intermediateKeys) {
+    takeTop(candidates.filter((item) => normalizePlaceName(item?.location) === locationKey), perIntermediateCap);
+  }
+
+  // If the route still has room, backfill with the next best places without changing caps.
+  if (shortlist.length < Math.min(days * 3, candidates.length)) {
+    const locationCounts = new Map();
+    shortlist.forEach((item) => {
+      const key = normalizePlaceName(item?.location);
+      locationCounts.set(key, (locationCounts.get(key) || 0) + 1);
+    });
+
+    const maxCount = Math.min(days * 3, candidates.length);
+    for (const item of sortPlacesBySelectionScore(candidates)) {
+      if (shortlist.length >= maxCount) break;
+      const locKey = normalizePlaceName(item?.location);
+      const isDestination = locKey === destinationKey;
+      const locCap = isDestination ? destinationCap : perIntermediateCap;
+      const currentCount = locationCounts.get(locKey) || 0;
+      const key = `${normalizePlaceName(item?.name)}|${locKey}`;
+      if (!item?.name || seen.has(key) || currentCount >= locCap) continue;
+      seen.add(key);
+      shortlist.push(item);
+      locationCounts.set(locKey, currentCount + 1);
+    }
+  }
+
+  return sortPlacesBySelectionScore(shortlist);
+};
+
 const geocodeWithGeoapify = async (place) => {
   const apiKey = getGeoapifyKey();
   if (!apiKey || !place) return null;
@@ -112,7 +361,7 @@ const fetchGeoapifyPlaces = async ({ lat, lng, radius = 50000 }) => {
     .filter((item) => item && Number.isFinite(item.lat) && Number.isFinite(item.lng));
 };
 
-const enforceDestinationPriority = ({ selected = [], candidates = [], destination = '', maxCount = 12 }) => {
+const enforceDestinationPriority = ({ selected = [], candidates = [], destination = '', maxCount = 12, days = 1 }) => {
   const destinationKey = normalizePlaceName(destination);
   const intermediates = [...new Set(
     candidates
@@ -138,7 +387,9 @@ const enforceDestinationPriority = ({ selected = [], candidates = [], destinatio
   ]));
 
   const perIntermediateCap = 2;
-  const destinationCap = Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
+  const destinationCap = days === 3
+    ? Math.min(maxCount, 5)
+    : Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
 
   const finalList = [];
   const used = new Set();
@@ -198,7 +449,7 @@ const enforceDestinationPriority = ({ selected = [], candidates = [], destinatio
     }));
 };
 
-const fallbackSelectPlaces = (candidates, maxCount, destination) => {
+const fallbackSelectPlaces = (candidates, maxCount, destination, days = 1) => {
   const seen = new Set();
   const baseline = candidates
     .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
@@ -220,6 +471,7 @@ const fallbackSelectPlaces = (candidates, maxCount, destination) => {
     candidates,
     destination,
     maxCount,
+    days,
   });
 };
 
@@ -232,8 +484,44 @@ const selectPlacesWithLLM = async ({ candidates, maxCount, days, destination }) 
       .filter((loc) => loc && loc !== normalizePlaceName(destination))
   )];
 
-  const destinationCap = Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
-  const prompt = `You are a travel curator.\nReturn ONLY valid JSON array.\n\nGiven this place list, select the best places for an itinerary.\nSelection rules:\n- prioritize famous landmarks and popularity\n- ensure diversity of experiences (culture, nature, viewpoints, etc.)\n- avoid duplicates or near-identical entries\n- keep geographic relevance to each checkpoint location\n- select at most ${maxCount} places total\n\nCRITICAL DISTRIBUTION RULES:\n- Final destination is: ${destination}\n- Destination places cap: at most ${destinationCap}\n- For each intermediate checkpoint, select at most 2 places\n- Keep final output suitable for max 3 visits per day\n- Intermediates are: ${JSON.stringify(intermediateLocations)}\n\nInput places:\n${JSON.stringify(candidates)}\n\nOutput format (JSON array only):\n[\n  {\n    "name": "Place Name",\n    "location": "Checkpoint Name",\n    "lat": 0,\n    "lng": 0,\n    "type": "landmark",\n    "rating": 0,\n    "popularity": 0,\n    "best_visit_reason": "one concise line"\n  }\n]`;
+  const destinationCap = days === 3
+    ? Math.min(maxCount, 5)
+    : Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
+  const prompt = `You are a strict travel selection engine. Return ONLY a valid JSON array and nothing else.
+
+Goal: pick only high-value tourist attractions that feel diverse and memorable.
+
+Hard rules:
+1) Output length MUST be <= ${maxCount}.
+2) For destination "${destination}", select at most ${destinationCap} places.
+3) For EACH intermediate checkpoint, select at most 2 places.
+4) Keep places geographically correct to their checkpoint location.
+5) Do not relocate places to wrong cities (example: Agra Fort must not be mapped to Mathura).
+6) Prefer famous/popular attractions first, then balance categories for varied feel.
+7) Sort output by priority descending: popularity + rating + tourist significance.
+8) Avoid duplicates and near-duplicates.
+
+Important: if the input contains both famous and lesser-known places for the same city, prefer the famous and more established tourist attractions.
+
+Trip days: ${days}
+Intermediate checkpoints: ${JSON.stringify(intermediateLocations)}
+
+Input candidates (already pre-ranked by popularity, rating, and tourist significance):
+${JSON.stringify(candidates)}
+
+Output JSON schema:
+[
+  {
+    "name": "Place Name",
+    "location": "Checkpoint Name",
+    "lat": 0,
+    "lng": 0,
+    "type": "landmark",
+    "rating": 0,
+    "popularity": 0,
+    "best_visit_reason": "one concise line"
+  }
+]`;
 
   const response = await llm.invoke(prompt);
   const raw = (response.content || response.text || '').toString().trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -606,17 +894,20 @@ const generatePlaces = asyncHandler(async (req, res) => {
           })));
         }
 
-        return fetchedPlaces.map((place) => ({
-          name: place.name,
-          lat: place.lat,
-          lng: place.lng,
-          rating: place.rating,
-          popularity: place.popularity,
-          type: place.category || 'attraction',
-          location: checkpointName,
-          best_visit_reason: '',
-          imageUrl: ''
-        }));
+        return fetchedPlaces
+          // Keep place assignments tight to checkpoint to avoid wrong-city cards.
+          .filter((place) => distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= 45)
+          .map((place) => ({
+            name: place.name,
+            lat: place.lat,
+            lng: place.lng,
+            rating: place.rating,
+            popularity: place.popularity,
+            type: place.category || 'attraction',
+            location: checkpointName,
+            best_visit_reason: '',
+            imageUrl: ''
+          }));
       } catch (error) {
         console.warn(`Geoapify fetch failed for ${checkpointName}:`, {
           status: error?.response?.status || null,
@@ -655,12 +946,14 @@ const generatePlaces = asyncHandler(async (req, res) => {
     });
   }
 
+  const rankedCandidates = buildStrictShortlist(discoveredUnique, trip.destination, days);
+
   // Strict day-based cap: max 3 visits per day total.
-  const maxSelectCount = Math.min(days * 3, discoveredUnique.length);
+  const maxSelectCount = Math.min(days * 3, rankedCandidates.length);
 
   let llmSelected = [];
   try {
-    const parsed = await selectPlacesWithLLM({ candidates: discoveredUnique, maxCount: maxSelectCount, days, destination: trip.destination });
+    const parsed = await selectPlacesWithLLM({ candidates: rankedCandidates, maxCount: maxSelectCount, days, destination: trip.destination });
     console.log('[LLM] selected raw place count:', Array.isArray(parsed) ? parsed.length : 0);
     if (Array.isArray(parsed) && parsed.length) {
       console.log('[LLM] selected raw place sample:', parsed.slice(0, 12));
@@ -679,7 +972,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
         const rating = toFiniteNumber(item.rating);
         const popularity = toFiniteNumber(item.popularity);
 
-        const matchingCandidate = discoveredUnique.find((candidate) => {
+        const matchingCandidate = rankedCandidates.find((candidate) => {
           const sameName = normalizePlaceName(candidate.name) === normalizePlaceName(name);
           const sameLocation = normalizePlaceName(candidate.location) === normalizePlaceName(location);
           return sameName && (sameLocation || (!sameLocation && normalizePlaceName(location) === normalizePlaceName(trip.destination)));
@@ -717,11 +1010,28 @@ const generatePlaces = asyncHandler(async (req, res) => {
     llmSelected = [];
   }
 
-  const selectedBase = llmSelected.length
-    ? enforceDestinationPriority({ selected: llmSelected, candidates: discoveredUnique, destination: trip.destination, maxCount: maxSelectCount })
-    : fallbackSelectPlaces(discoveredUnique, maxSelectCount, trip.destination);
+  const scorePlace = (place) => {
+    const popularity = Number(place?.popularity) || 0;
+    const rating = Number(place?.rating) || 0;
+    return (popularity * 2.0) + (rating * 1.2);
+  };
 
-  const uniquePlaces = selectedBase.filter((place, idx, self) => {
+  const selectedBase = llmSelected.length
+    ? enforceDestinationPriority({
+      selected: [...llmSelected].sort((a, b) => scorePlaceForSelection(b) - scorePlaceForSelection(a)),
+      candidates: rankedCandidates,
+      destination: trip.destination,
+      maxCount: maxSelectCount,
+      days,
+    })
+    : fallbackSelectPlaces(rankedCandidates, maxSelectCount, trip.destination, days);
+
+  const priorityOrdered = sortPlacesBySelectionScore(selectedBase).map((place) => ({
+    ...place,
+    best_visit_reason: (place.best_visit_reason || '').trim() || `Popular highlight near ${place.location}.`,
+  }));
+
+  const uniquePlaces = priorityOrdered.filter((place, idx, self) => {
     const key = `${normalizePlaceName(place.name)}|${normalizePlaceName(place.location)}`;
     return place.name && self.findIndex((candidate) => `${normalizePlaceName(candidate.name)}|${normalizePlaceName(candidate.location)}` === key) === idx;
   });
@@ -868,12 +1178,15 @@ const generateItinerary = asyncHandler(async (req, res) => {
   }
 
   console.log('✅ Trip status is valid (places_selected)');
+  const tripDays = getTripDaysFromDates(trip.dates);
+  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays);
 
   const prompt = buildItineraryPrompt({
     origin: trip.origin,
     destination: trip.destination,
-    days: getTripDaysFromDates(trip.dates),
-    selectedPlaces: trip.selectedPlaces,
+    days: tripDays,
+    selectedPlaces: groupedPlan.orderedPlaces,
+    groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
     budget: trip.budget,
     dates: trip.dates
   });
@@ -898,35 +1211,50 @@ const generateItinerary = asyncHandler(async (req, res) => {
     
     // Generate simple fallback itinerary
     itineraryData = {
-      itinerary: trip.selectedPlaces.slice(0, getTripDaysFromDates(trip.dates)).map((place, index) => {
-        const currentCity = place.location || trip.destination;
+      itinerary: groupedPlan.groupedPlacesByDay.map((dayPlaces, index) => {
+        const firstPlace = dayPlaces?.[0] || null;
+        const currentCity = firstPlace?.location || trip.destination;
+        const prevDayFirst = groupedPlan.groupedPlacesByDay[index - 1]?.[0] || null;
         const previousCity = index === 0
           ? trip.origin
-          : (trip.selectedPlaces[index - 1]?.location || trip.origin);
+          : (prevDayFirst?.location || trip.origin);
         const isTransferDay = index > 0 && previousCity !== currentCity;
+
+        const activities = (dayPlaces || []).map((place, activityIndex) => ({
+          title: isTransferDay && activityIndex === 0
+            ? `After reaching ${currentCity}, visit ${place.name}`
+            : `Visit ${place.name}`,
+          time: activityIndex === 0 ? '9:00 AM - 11:00 AM' : activityIndex === 1 ? '12:00 PM - 2:00 PM' : '3:00 PM - 5:00 PM',
+          duration_min: 120,
+          description: place.best_visit_reason || 'Explore attractions',
+          type: 'outdoor',
+          location: place.location || currentCity || 'Main area',
+        }));
+
+        if (!activities.length) {
+          activities.push({
+            title: `Light exploration around ${currentCity}`,
+            time: '10:00 AM - 12:00 PM',
+            duration_min: 120,
+            description: 'Buffer day for relaxed local sightseeing.',
+            type: 'outdoor',
+            location: currentCity || 'Main area',
+          });
+        }
 
         return {
           day: index + 1,
           city: currentCity,
-          theme: place.type || 'Sightseeing',
+          theme: firstPlace?.type || 'Sightseeing',
           weather: 'Clear',
           weather_note: 'Good conditions',
-          activities: [
-            {
-              title: isTransferDay ? `After reaching ${currentCity}, visit ${place.name}` : `Visit ${place.name}`,
-              time: '9:00 AM - 12:00 PM',
-              duration_min: 180,
-              description: place.best_visit_reason || 'Explore attractions',
-              type: 'outdoor',
-              location: currentCity || 'Main area'
-            }
-          ],
+          activities,
           travel: isTransferDay ? {
             from: previousCity,
             to: currentCity,
             duration: '3-6 hours',
             mode: 'car',
-            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`
+            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`,
           } : null,
           food: [
             {
@@ -957,8 +1285,8 @@ const generateItinerary = asyncHandler(async (req, res) => {
             'Carry water and sunscreen'
           ],
           summary: isTransferDay
-            ? `Traveled from ${previousCity} to ${currentCity}, then visited ${place.name}.`
-            : `Explored ${place.name} and enjoyed local cuisine in ${currentCity}.`
+            ? `Traveled from ${previousCity} to ${currentCity}, then explored nearby attractions.`
+            : `Explored nearby attractions around ${currentCity}.`
         };
       }),
       total_estimated_cost: trip.budget,
