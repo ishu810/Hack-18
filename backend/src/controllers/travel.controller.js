@@ -3,6 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { buildItineraryPrompt } from '../utils/itineraryPrompt.js';
 import { computeRoute as computeRouteService } from '../services/routing/routing.service.js';
+import { fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
 import axios from 'axios';
 
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
@@ -238,150 +239,6 @@ const distanceKm = (a, b) => {
   const val = Math.sin(dLat / 2) ** 2
     + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 6371 * 2 * Math.atan2(Math.sqrt(val), Math.sqrt(1 - val));
-};
-
-const getPlaceCoords = (place) => {
-  const lat = toFiniteNumber(place?.lat);
-  const lng = toFiniteNumber(place?.lng ?? place?.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-  return { lat, lng };
-};
-
-const splitEvenly = (items = [], parts = 1) => {
-  const count = Math.max(1, Number(parts) || 1);
-  const buckets = Array.from({ length: count }, () => []);
-  if (!items.length) return buckets;
-
-  items.forEach((item, index) => {
-    buckets[index % count].push(item);
-  });
-
-  return buckets;
-};
-
-const orderPlacesByNearest = (places = []) => {
-  if (!Array.isArray(places) || places.length <= 2) return [...places];
-
-  const remaining = [...places];
-  const ordered = [remaining.shift()];
-
-  while (remaining.length) {
-    const current = ordered[ordered.length - 1];
-    const currentCoords = getPlaceCoords(current);
-    if (!currentCoords) {
-      ordered.push(remaining.shift());
-      continue;
-    }
-
-    let nearestIndex = 0;
-    let nearestDistance = Infinity;
-    remaining.forEach((candidate, index) => {
-      const candidateCoords = getPlaceCoords(candidate);
-      if (!candidateCoords) return;
-      const dist = distanceKm(currentCoords, candidateCoords);
-      if (dist < nearestDistance) {
-        nearestDistance = dist;
-        nearestIndex = index;
-      }
-    });
-
-    ordered.push(remaining.splice(nearestIndex, 1)[0]);
-  }
-
-  return ordered;
-};
-
-const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
-  const days = Math.max(1, Number(tripDays) || 1);
-  const input = Array.isArray(selectedPlaces) ? [...selectedPlaces] : [];
-  const withCoords = input.filter((place) => getPlaceCoords(place));
-
-  if (!withCoords.length) {
-    const groupedNoCoords = splitEvenly(input, days);
-    return {
-      groupedPlacesByDay: groupedNoCoords,
-      orderedPlaces: groupedNoCoords.flat(),
-    };
-  }
-
-  const targetPerDay = Math.max(1, Math.ceil(withCoords.length / days));
-  const unassigned = [...withCoords];
-  const grouped = Array.from({ length: days }, () => []);
-
-  for (let dayIndex = 0; dayIndex < days && unassigned.length; dayIndex += 1) {
-    const dayPlaces = [];
-    let current = unassigned.shift();
-    dayPlaces.push(current);
-
-    while (unassigned.length && dayPlaces.length < targetPerDay) {
-      const currentCoords = getPlaceCoords(current);
-      if (!currentCoords) {
-        current = unassigned.shift();
-        dayPlaces.push(current);
-        continue;
-      }
-
-      let nearestIdx = -1;
-      let nearestDist = Infinity;
-      unassigned.forEach((candidate, index) => {
-        const candidateCoords = getPlaceCoords(candidate);
-        if (!candidateCoords) return;
-        const dist = distanceKm(currentCoords, candidateCoords);
-        if (dist < nearestDist) {
-          nearestDist = dist;
-          nearestIdx = index;
-        }
-      });
-
-      const remainingDays = Math.max(0, days - dayIndex - 1);
-      // Dynamic distance limits based on number of places already in the day
-      const maxDistanceFirstPlace = Number(process.env.DAY_GROUPING_MAX_DIST_FIRST || 55);
-      const maxDistanceSubsequentPlaces = Number(process.env.DAY_GROUPING_MAX_DIST_SUBSEQUENT || 40);
-      const adaptiveLimitKm = dayPlaces.length === 1 ? maxDistanceFirstPlace : maxDistanceSubsequentPlaces;
-      const shouldBreakForDistance = nearestDist > adaptiveLimitKm && unassigned.length > remainingDays;
-
-      if (nearestIdx < 0 || shouldBreakForDistance) break;
-
-      current = unassigned.splice(nearestIdx, 1)[0];
-      dayPlaces.push(current);
-    }
-
-    grouped[dayIndex] = orderPlacesByNearest(dayPlaces);
-  }
-
-  while (unassigned.length) {
-    let bestDay = 0;
-    let bestDistance = Infinity;
-    const candidate = unassigned.shift();
-    const candidateCoords = getPlaceCoords(candidate);
-
-    grouped.forEach((dayPlaces, dayIndex) => {
-      if (!dayPlaces.length) {
-        bestDay = dayIndex;
-        bestDistance = -1;
-        return;
-      }
-
-      if (!candidateCoords) return;
-      const anchorCoords = getPlaceCoords(dayPlaces[dayPlaces.length - 1]);
-      if (!anchorCoords) return;
-
-      const dist = distanceKm(candidateCoords, anchorCoords);
-      if (dist < bestDistance) {
-        bestDistance = dist;
-        bestDay = dayIndex;
-      }
-    });
-
-    grouped[bestDay].push(candidate);
-    grouped[bestDay] = orderPlacesByNearest(grouped[bestDay]);
-  }
-
-  const groupedPlacesByDay = grouped.map((dayPlaces) => [...dayPlaces]);
-  return {
-    groupedPlacesByDay,
-    orderedPlaces: groupedPlacesByDay.flat(),
-  };
 };
 
 const scorePlaceForSelection = (place = {}) => {
@@ -940,6 +797,125 @@ const asNumber = (value, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const mergeUniqueVenueList = (current = [], additions = []) => {
+  const merged = [];
+  const seen = new Set();
+
+  [...asArray(current), ...asArray(additions)].forEach((item) => {
+    const venue = asObject(item) || {};
+    const name = asString(venue.name).trim();
+    const area = asString(venue.area || venue.vicinity).trim();
+    const key = `${normalizePlaceName(name)}|${normalizePlaceName(area)}`;
+    if (!name || seen.has(key)) return;
+    seen.add(key);
+    merged.push(venue);
+  });
+
+  return merged;
+};
+
+const normalizeStayVenue = (value = {}) => {
+  const stay = asObject(value) || {};
+  return {
+    name: asString(stay.name),
+    area: asString(stay.area),
+    type: asString(stay.type),
+    reason: asString(stay.reason),
+    imageUrl: asString(stay.imageUrl),
+    rating: asNumber(stay.rating, 0),
+    price_level: asNumber(stay.price_level, 0),
+    googleMapsUrl: asString(stay.googleMapsUrl),
+    vicinity: asString(stay.vicinity),
+    placeId: asString(stay.placeId),
+  };
+};
+
+const normalizeDiningVenue = (value = {}) => {
+  const spot = asObject(value) || {};
+  return {
+    name: asString(spot.name),
+    cuisine: asString(spot.cuisine),
+    area: asString(spot.area),
+    best_for: asString(spot.best_for),
+    imageUrl: asString(spot.imageUrl),
+    rating: asNumber(spot.rating, 0),
+    price_level: asNumber(spot.price_level, 0),
+    googleMapsUrl: asString(spot.googleMapsUrl),
+    vicinity: asString(spot.vicinity),
+    placeId: asString(spot.placeId),
+    distanceKm: asNumber(spot.distanceKm, 0),
+    isOpenNow: Boolean(spot.isOpenNow),
+  };
+};
+
+const enrichItineraryWithGoogleVenues = async (rawItineraryData, trip) => {
+  const data = asObject(rawItineraryData) || {};
+  const days = asArray(data.itinerary);
+
+  const enrichedDays = await Promise.all(days.map(async (day) => {
+    const d = asObject(day) || {};
+    const dayCity = asString(d.city) || asString(d.stay?.area) || trip.destination || trip.origin;
+    const center = await geocodeWithGeoapify(dayCity);
+
+    const currentStay = normalizeStayVenue(d.stay);
+    const currentDining = asArray(d.dining_places).map(normalizeDiningVenue);
+    const currentStayOptions = asArray(d.stay_options).map(normalizeStayVenue);
+
+    if (!center) {
+      return {
+        ...d,
+        stay: currentStay,
+        stay_options: currentStayOptions,
+        dining_places: currentDining,
+      };
+    }
+
+    try {
+      const venueBundle = await fetchGoogleVenueRecommendations({
+        lat: center.lat,
+        lng: center.lng,
+        city: dayCity,
+        budget: trip.budget,
+      });
+
+      return {
+        ...d,
+        stay: currentStay.name || currentStay.area || venueBundle.stay?.name
+          ? {
+            ...venueBundle.stay,
+            ...currentStay,
+            name: currentStay.name || venueBundle.stay?.name || '',
+            area: currentStay.area || venueBundle.stay?.area || dayCity,
+            type: currentStay.type || venueBundle.stay?.type || 'hotel',
+            reason: currentStay.reason || venueBundle.stay?.reason || `Recommended stay near ${dayCity}.`,
+            imageUrl: currentStay.imageUrl || venueBundle.stay?.imageUrl || '',
+            rating: currentStay.rating || venueBundle.stay?.rating || 0,
+            price_level: currentStay.price_level || venueBundle.stay?.price_level || 0,
+            googleMapsUrl: currentStay.googleMapsUrl || venueBundle.stay?.googleMapsUrl || '',
+            vicinity: currentStay.vicinity || venueBundle.stay?.vicinity || '',
+            placeId: currentStay.placeId || venueBundle.stay?.placeId || '',
+          }
+          : venueBundle.stay,
+        stay_options: mergeUniqueVenueList(currentStayOptions, venueBundle.stay_options),
+        dining_places: mergeUniqueVenueList(currentDining, venueBundle.dining_places),
+      };
+    } catch (error) {
+      console.warn(`Google venue enrichment failed for ${dayCity}:`, error?.message || error);
+      return {
+        ...d,
+        stay: currentStay,
+        stay_options: currentStayOptions,
+        dining_places: currentDining,
+      };
+    }
+  }));
+
+  return {
+    ...data,
+    itinerary: enrichedDays,
+  };
+};
+
 const normalizeItineraryForSave = (rawData) => {
   const data = asObject(rawData) || {};
   const days = asArray(data.itinerary).map((day, index) => {
@@ -973,7 +949,32 @@ const normalizeItineraryForSave = (rawData) => {
         name: asString(s.name),
         cuisine: asString(s.cuisine),
         area: asString(s.area),
-        best_for: asString(s.best_for)
+        best_for: asString(s.best_for),
+        imageUrl: asString(s.imageUrl),
+        rating: asNumber(s.rating, 0),
+        price_level: asNumber(s.price_level, 0),
+        googleMapsUrl: asString(s.googleMapsUrl),
+        vicinity: asString(s.vicinity),
+        placeId: asString(s.placeId),
+        distanceKm: asNumber(s.distanceKm, 0),
+        isOpenNow: Boolean(s.isOpenNow),
+      };
+    });
+
+    const stayOptions = asArray(d.stay_options).map((option) => {
+      const s = asObject(option) || {};
+      return {
+        name: asString(s.name),
+        area: asString(s.area),
+        type: asString(s.type),
+        reason: asString(s.reason),
+        imageUrl: asString(s.imageUrl),
+        rating: asNumber(s.rating, 0),
+        price_level: asNumber(s.price_level, 0),
+        googleMapsUrl: asString(s.googleMapsUrl),
+        vicinity: asString(s.vicinity),
+        placeId: asString(s.placeId),
+        distanceKm: asNumber(s.distanceKm, 0),
       };
     });
 
@@ -1011,11 +1012,19 @@ const normalizeItineraryForSave = (rawData) => {
       } : null,
       food,
       dining_places,
+      stay_options: stayOptions,
       local_explorations: asArray(d.local_explorations).map((item) => asString(item)).filter(Boolean),
       stay: stayObj ? {
         area: asString(stayObj.area),
         type: asString(stayObj.type),
-        reason: asString(stayObj.reason)
+        reason: asString(stayObj.reason),
+        name: asString(stayObj.name),
+        imageUrl: asString(stayObj.imageUrl),
+        rating: asNumber(stayObj.rating, 0),
+        price_level: asNumber(stayObj.price_level, 0),
+        googleMapsUrl: asString(stayObj.googleMapsUrl),
+        vicinity: asString(stayObj.vicinity),
+        placeId: asString(stayObj.placeId),
       } : null,
       tips: asArray(d.tips).map((tip) => asString(tip)).filter(Boolean),
       summary: asString(d.summary)
@@ -1141,10 +1150,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
 
         return fetchedPlaces
           // Keep place assignments tight to checkpoint to avoid wrong-city cards.
-          .filter((place) => {
-            const maxPlaceDistanceKm = Number(process.env.MAX_PLACE_DISTANCE_FROM_CENTER || 45);
-            return distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= maxPlaceDistanceKm;
-          })
+          .filter((place) => distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= 45)
           .map((place) => ({
             name: place.name,
             lat: place.lat,
@@ -1524,7 +1530,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
             to: currentCity,
             duration: '3-6 hours',
             mode: 'car',
-            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`,
+            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`
           } : null,
           food: [
             {
@@ -1568,6 +1574,13 @@ const generateItinerary = asyncHandler(async (req, res) => {
       ],
       best_time_to_visit: 'Check weather forecast before the trip'
     };
+  }
+
+  try {
+    itineraryData = await enrichItineraryWithGoogleVenues(itineraryData, trip);
+    console.log('✅ Google venue enrichment completed');
+  } catch (enrichmentError) {
+    console.warn('⚠️ Google venue enrichment skipped:', enrichmentError.message || enrichmentError);
   }
 
   try {

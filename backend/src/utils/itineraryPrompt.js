@@ -62,10 +62,11 @@ Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, inc
 5. Intra-day transit: explicitly account for travel time between consecutive activities (A->B, B->C)
 6. Food: 1-2 key meals recommended with restaurant type (e.g., "Lunch: Local cuisine near ${destination}")
 7. Dining picks: 1-2 famous dining places with cuisine + what they are best known for
-8. Local explorations: 1-2 lesser-known nearby local spots/gems
-9. Stay area: 1 hotel area suggestion (e.g., "Near market area, mid-range hotels")
-10. Tips: 2-3 concise travel tips (e.g., "Carry water", "Early start recommended")
-11. Summary: 1 line summarizing the day
+8) Stay options: include 1-3 hotel/hostel recommendations near the day city with a photo URL when possible
+9) Local explorations: 1-2 lesser-known nearby local spots/gems
+10) Stay area: 1 hotel area suggestion (e.g., "Near market area, mid-range hotels")
+11) Tips: 2-3 concise travel tips (e.g., "Carry water", "Early start recommended")
+12) Summary: 1 line summarizing the day
 
 MANDATORY SEQUENCING RULES (VERY IMPORTANT):
 - If day city is different from previous day city, travel MUST be present and explicit.
@@ -158,7 +159,23 @@ IMPORTANT:
           "name": "Famous dining place",
           "cuisine": "Rajasthani/North Indian/Street Food",
           "area": "Neighborhood/Market",
-          "best_for": "Signature dish or dining experience"
+          "best_for": "Signature dish or dining experience",
+          "imageUrl": "https://...",
+          "rating": 4.5,
+          "price_level": 2,
+          "googleMapsUrl": "https://..."
+        }
+      ],
+      "stay_options": [
+        {
+          "name": "Hotel Name",
+          "area": "Recommended area",
+          "type": "hotel/hostel/guest house",
+          "reason": "Why it fits the trip",
+          "imageUrl": "https://...",
+          "rating": 4.3,
+          "price_level": 2,
+          "googleMapsUrl": "https://..."
         }
       ],
       "local_explorations": [
@@ -168,7 +185,12 @@ IMPORTANT:
       "stay": {
         "area": "Recommended area",
         "type": "budget/mid-range/luxury",
-        "reason": "Why this area"
+        "reason": "Why this area",
+        "name": "Optional property name",
+        "imageUrl": "https://...",
+        "rating": 4.4,
+        "price_level": 2,
+        "googleMapsUrl": "https://..."
       },
       "tips": [
         "Tip 1",
