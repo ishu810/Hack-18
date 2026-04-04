@@ -1,12 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   CloudLightning, Droplets, Eye, CloudRain, Thermometer, 
-<<<<<<< HEAD
   Sun, Moon, MapPin, AlertTriangle, Wind, Sunrise, 
   Sunset, Plane, Umbrella, Cloud, 
-=======
-  Sun, Moon, MapPin, AlertTriangle, Wind, Plane, Cloud, Search,
->>>>>>> main
   
   Globe,
 } from 'lucide-react';
@@ -25,40 +21,6 @@ const WeatherDashboard = () => {
   }, []);
 
   if (loading) return (
-<<<<<<< HEAD
-    <div className="min-h-screen bg-[#05070a] flex flex-col items-center justify-center text-cyan-400 font-mono">
-      <Plane className="animate-bounce mb-4" size={40} />
-      <p className="tracking-[0.3em] text-[10px]">SYNCING GLOBAL TERMINALS...</p>
-    </div>
-  );
-
-  const { current, hourly, daily, alerts, location, advisories } = weatherData;
-
-  return (
-    <div className="min-h-screen bg-[#05070a] bg-[radial-gradient(circle_at_top_right,_#1e293b_0%,_#05070a_60%)] text-slate-300 p-4 md:p-8 font-sans selection:bg-cyan-500/30">
-      
-      {/* 1. NAVIGATION HEADER */}
-      <div className="max-w-6xl mx-auto mb-8 flex flex-col md:flex-row md:items-center justify-between border-b border-white/10 pb-6 gap-4">
-        <div className="flex items-center gap-4">
-          <div className="bg-cyan-500 p-2 rounded-lg shadow-[0_0_15px_rgba(6,182,212,0.5)]">
-            <Globe className="text-white" size={24} />
-          </div>
-          <div>
-            <h1 className="text-white font-black tracking-tighter text-2xl">VOYAGE<span className="text-cyan-500">INTEL</span></h1>
-            <p className="text-[9px] tracking-[0.2em] text-slate-500 font-bold uppercase">Global Logistics & Weather Division</p>
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-6 text-[10px] font-bold tracking-widest text-slate-400">
-          <div className="flex flex-col items-end">
-            <span className="text-cyan-500/80">TERMINAL ID</span>
-            <span className="text-white">BOM-GATE-04</span>
-          </div>
-          <div className="h-8 w-[1px] bg-white/10"></div>
-          <div className="flex flex-col items-end">
-            <span className="text-cyan-500/80">LOCAL TIME</span>
-            <span className="text-white">{new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} IST</span>
-=======
     <div className="min-h-screen bg-[#0b0f1a] flex flex-col items-center justify-center text-blue-400 font-mono">
       <div className="relative mb-4">
         <div className="h-14 w-14 rounded-full border border-slate-700 bg-[#111827] grid place-items-center">
@@ -97,7 +59,6 @@ const WeatherDashboard = () => {
           <div className="flex flex-col items-end">
             <span className="text-blue-400 uppercase tracking-wide">Local Time</span>
             <span className="text-white font-mono">{new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} IST</span>
->>>>>>> main
           </div>
         </div>
       </div>
@@ -108,24 +69,6 @@ const WeatherDashboard = () => {
         <div className="lg:col-span-8 space-y-6">
           
           {/* MAIN WEATHER GLASS CARD */}
-<<<<<<< HEAD
-          <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
-            <div className="absolute top-0 right-0 p-8 opacity-10">
-               <Plane size={180} className="-rotate-12" />
-            </div>
-            
-            <div className="relative z-10">
-              <div className="flex items-center gap-2 text-cyan-400 text-[10px] font-bold tracking-widest mb-2">
-                <MapPin size={12} /> {location.city.toUpperCase()} / {location.region.toUpperCase()}
-              </div>
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-6xl md:text-8xl font-light text-white tracking-tighter">
-                    {current.temp}<span className="text-cyan-500 font-normal">°</span>
-                  </h2>
-                  <p className="text-lg text-slate-400 font-medium lowercase">
-                    Expect <span className="text-white">{current.condition_text}</span> today.
-=======
           <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-[#0f172a] p-6 md:p-8 shadow-[0_16px_40px_rgba(0,0,0,0.35)]">
             <div className="relative z-10">
               <div className="flex items-center gap-2 text-blue-400 text-xs font-medium mb-2">
@@ -138,18 +81,12 @@ const WeatherDashboard = () => {
                   </h2>
                   <p className="text-base text-slate-400 font-medium">
                     Expect <span className="text-white font-semibold">{current.condition_text}</span> today.
->>>>>>> main
                   </p>
                 </div>
                 <div className="text-right">
                   <WeatherIcon condition={current.condition_code} size={64} className="text-white mb-2" />
-<<<<<<< HEAD
-                  <div className="bg-white/10 rounded-full px-4 py-1 backdrop-blur-md border border-white/10">
-                    <span className="text-[10px] font-bold text-cyan-400">AQI {current.aqi}</span>
-=======
                   <div className="bg-[#111827] rounded-full px-4 py-1 border border-blue-500/35">
                     <span className="text-xs font-semibold text-blue-400">AQI {current.aqi}</span>
->>>>>>> main
                   </div>
                 </div>
               </div>
@@ -158,24 +95,6 @@ const WeatherDashboard = () => {
 
           {/* GRID METRICS */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-<<<<<<< HEAD
-            <GlassMetric icon={<Droplets className="text-cyan-400"/>} label="Humidity" value={`${current.humidity}%`} />
-            <GlassMetric icon={<Wind className="text-blue-400"/>} label="Wind Speed" value={`${current.wind_speed}km/h`} />
-            <GlassMetric icon={<Eye className="text-indigo-400"/>} label="Visibility" value={`${current.visibility}km`} />
-            <GlassMetric icon={<Thermometer className="text-orange-400"/>} label="UV Index" value={current.uv} />
-          </div>
-
-          {/* HOURLY STRIP */}
-          <div className="rounded-3xl border border-white/5 bg-black/20 p-6">
-             <h3 className="text-[10px] font-bold tracking-[0.2em] mb-6 text-slate-500 uppercase">Hourly Forecast / Next 6 Hours</h3>
-             <div className="flex justify-between gap-4 overflow-x-auto pb-2">
-                {hourly.map((h, i) => (
-                  <div key={i} className="flex flex-col items-center min-w-[70px]">
-                    <span className="text-[10px] text-slate-500 mb-3 font-bold">{h.time}</span>
-                    <WeatherIcon condition={h.condition} size={20} className="mb-3 text-white" />
-                    <span className="text-sm font-bold text-white">{h.temp}°</span>
-                    <span className="text-[9px] text-cyan-500 mt-1">{h.precip_prob}</span>
-=======
             <GlassMetric icon={<Droplets className="text-blue-400"/>} label="Humidity" value={`${current.humidity}%`} />
             <GlassMetric icon={<Wind className="text-blue-400"/>} label="Wind Speed" value={`${current.wind_speed}km/h`} />
             <GlassMetric icon={<Eye className="text-blue-400"/>} label="Visibility" value={`${current.visibility}km`} />
@@ -192,7 +111,6 @@ const WeatherDashboard = () => {
                     <WeatherIcon condition={h.condition} size={20} className="mb-3 text-white" />
                     <span className="text-sm font-semibold text-white">{h.temp}°</span>
                     <span className="text-[11px] text-blue-400 mt-1 font-mono">{h.precip_prob}</span>
->>>>>>> main
                   </div>
                 ))}
              </div>
@@ -203,32 +121,18 @@ const WeatherDashboard = () => {
         <div className="lg:col-span-4 space-y-6">
           
           {/* ADVISORY BOX */}
-<<<<<<< HEAD
-          <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 to-transparent backdrop-blur-xl p-6">
-            <div className="flex items-center gap-2 mb-6">
-              <AlertTriangle className="text-orange-500" size={18} />
-              <h3 className="text-[10px] font-bold tracking-[0.2em] text-white uppercase">Travel Alerts</h3>
-=======
           <div className="rounded-2xl border border-slate-800 bg-[#0f172a] p-6">
             <div className="flex items-center gap-2 mb-6">
               <AlertTriangle className="text-amber-400" size={18} />
               <h3 className="text-sm font-semibold text-amber-400">Travel Alerts</h3>
->>>>>>> main
             </div>
             <div className="space-y-6">
               {advisories.map((adv, i) => (
                 <div key={i} className="group cursor-default">
-<<<<<<< HEAD
-                  <p className={`text-[11px] font-bold mb-1 transition-colors ${adv.color.replace('bg-', 'text-')}`}>
-                    {adv.title.toUpperCase()}
-                  </p>
-                  <p className="text-[10px] text-slate-500 leading-relaxed group-hover:text-slate-300 transition-colors">
-=======
                   <p className={`text-sm font-semibold mb-1 transition-colors ${adv.color.replace('bg-', 'text-')}`}>
                     {adv.title}
                   </p>
                   <p className="text-xs text-slate-400 leading-relaxed group-hover:text-white transition-colors">
->>>>>>> main
                     {adv.text}
                   </p>
                 </div>
@@ -237,16 +141,6 @@ const WeatherDashboard = () => {
           </div>
 
           {/* 5-DAY VERTICAL */}
-<<<<<<< HEAD
-          <div className="rounded-3xl border border-white/10 bg-black/40 p-6">
-            <h3 className="text-[10px] font-bold tracking-[0.2em] mb-6 text-slate-500 uppercase">5-Day Outlook</h3>
-            <div className="space-y-5">
-              {daily.map((day, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-slate-400 w-10">{day.label}</span>
-                  <WeatherIcon condition={day.condition} size={16} className="text-white" />
-                  <div className="flex gap-3 text-[11px] font-bold">
-=======
           <div className="rounded-2xl border border-slate-800 bg-[#0f172a] p-6">
             <h3 className="text-sm font-semibold mb-4 text-amber-400">5-Day Outlook</h3>
             <div className="space-y-5">
@@ -255,7 +149,6 @@ const WeatherDashboard = () => {
                   <span className="text-xs font-medium text-slate-400 w-10">{day.label}</span>
                   <WeatherIcon condition={day.condition} size={16} className="text-white" />
                   <div className="flex gap-3 text-sm font-semibold">
->>>>>>> main
                     <span className="text-white">{day.temp_high}°</span>
                     <span className="text-slate-600">{day.temp_low}°</span>
                   </div>
@@ -273,17 +166,10 @@ const WeatherDashboard = () => {
 // --- STYLED SUB-COMPONENTS ---
 
 const GlassMetric = ({ icon, label, value }) => (
-<<<<<<< HEAD
-  <div className="rounded-2xl border border-white/5 bg-white/5 p-5 hover:bg-white/10 transition-all cursor-default">
-    <div className="mb-3">{icon}</div>
-    <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{label}</p>
-    <p className="text-xl font-bold text-white mt-1">{value}</p>
-=======
   <div className="rounded-xl border border-slate-800 bg-[#0f172a] p-4 hover:bg-[#111827] transition-colors cursor-default">
     <div className="mb-3">{icon}</div>
     <p className="text-xs font-medium text-slate-400">{label}</p>
     <p className="text-2xl font-semibold text-white mt-1">{value}</p>
->>>>>>> main
   </div>
 );
 

@@ -22,8 +22,8 @@ export default function AuthLayout({
   cardWidthClass = 'max-w-[34rem]',
 }) {
   const backgroundClass = scene === 'register'
-    ? "bg-[linear-gradient(180deg,rgba(8,12,22,0.2),rgba(8,12,22,0.5)),url('/detective_bg.png')]"
-    : "bg-[linear-gradient(180deg,rgba(8,12,22,0.2),rgba(8,12,22,0.5)),url('/detective_bg.png')]";
+    ? "bg-[linear-gradient(180deg,rgba(8,12,22,0.2),rgba(8,12,22,0.5)),url('/detective.bg.png')]"
+    : "bg-[linear-gradient(180deg,rgba(8,12,22,0.2),rgba(8,12,22,0.5)),url('/detective.bg.png')]";
 
   return (
     <main className="relative min-h-screen w-full">
