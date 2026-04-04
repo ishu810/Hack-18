@@ -31,23 +31,15 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ["ranger", "doctor", "admin"],
       default: "ranger",
-      required: true,
     },
     age: {
-    type: Number,
-    required: function () {
-      // only required for manually registered users
-      return this.provider === "local";
-    },
+      type: Number,
   },
 
 
     gender: {
-    type: String,
-    enum: ["male", "female", "other", "prefer_not_to_say"],
-    required: function () {
-      return this.provider === "local";
-    },
+      type: String,
+      enum: ["male", "female", "other", "prefer_not_to_say"],
   },
 
     avatar:{
@@ -122,10 +114,10 @@ userSchema.pre("save", async function () {
   this.password = await bcrypt.hash(this.password, 10);
 });
 
-userSchema.pre("save", function (next) {
+userSchema.pre("save", function () {
   if (this.role === "doctor") {
     if (!this.specialization || !this.licenseNumber) {
-      return next(new Error("Doctor profile incomplete"));
+      throw new Error("Doctor profile incomplete");
     }
   }
 
@@ -135,8 +127,6 @@ userSchema.pre("save", function (next) {
     this.licenseNumber = undefined;
     this.experience = undefined;
   }
-
-
 });
 
 

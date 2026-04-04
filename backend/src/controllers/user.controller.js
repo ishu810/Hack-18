@@ -26,34 +26,19 @@ const generateAccessAndRefreshTokens = async (userId) => {
 
 
   const registerUser=asyncHandler(async (req ,res)=>{
-    const {username,fullname,email,age,gender,role,password}=req.body;
+    const {username,email,role,password}=req.body;
+    const normalizedRole = role || "ranger";
 
 
     if (!username) {
         throw new Error("Username is required");
       }
-    if (!fullname) {
-        throw new Error("Full name is required");
-      }
-      
       if (!email) {
         throw new Error("Email is required");
       }
       
       if (!password) {
         throw new Error("Password is required");
-      }
-    
-      if (!age || isNaN(age) || Number(age) <= 0) {
-        throw new Error("Valid age is required");
-      }
-      
-      if (!gender) {
-        throw new Error("Gender is required");
-      }
-      
-      if (!role) {
-        throw new Error("Role is required");
       }
       
       const existedUser = await User.findOne({
@@ -66,11 +51,9 @@ const generateAccessAndRefreshTokens = async (userId) => {
         
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        fullname: fullname.trim().toLowerCase(),
+        fullname: username.trim().toLowerCase(),
 
-        age: Number(age),
-        gender,
-        role,
+        role: normalizedRole,
         password: password,
         provider: "local",
         isProfileComplete: true,
@@ -132,7 +115,8 @@ const loginUser = asyncHandler(async (req, res) => {
     // cookie options
     const options = {
       httpOnly: true,
-      secure: true, 
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax"
     };
   
     return res
@@ -160,7 +144,8 @@ const loginUser = asyncHandler(async (req, res) => {
   
     const options = {
       httpOnly: true,
-      secure: true
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax"
     };
   
     return res
@@ -173,4 +158,15 @@ const loginUser = asyncHandler(async (req, res) => {
       });
   });
 
-  export {registerUser,loginUser,logoutUser}
+  const getCurrentUser = asyncHandler(async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: req.user
+    });
+  });
+
+  export {registerUser,loginUser,logoutUser,getCurrentUser}
