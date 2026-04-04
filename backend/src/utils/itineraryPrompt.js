@@ -1,10 +1,26 @@
-export const buildItineraryPrompt = ({ origin, destination, days: tripDays, selectedPlaces, groupedPlacesByDay = [], budget, dates }) => {
+export const buildItineraryPrompt = ({
+  origin,
+  destination,
+  days: tripDays,
+  selectedPlaces,
+  groupedPlacesByDay = [],
+  weatherByDay = [],
+  budget,
+  dates
+}) => {
   const placesText = selectedPlaces.map(p => `${p.name} (${p.location})`).join(', ');
   const dateRange = dates.length > 0 ? `from ${dates[0]} to ${dates[dates.length - 1]}` : '';
   const groupedByDayText = (groupedPlacesByDay || [])
     .map((dayPlaces, index) => {
       const labels = (dayPlaces || []).map((place) => `${place.name} (${place.location})`).join(', ');
       return `Day ${index + 1}: ${labels || 'No fixed places'}`;
+    })
+    .join('\n');
+
+  const weatherByDayText = (weatherByDay || [])
+    .map((entry, index) => {
+      if (!entry) return `Day ${index + 1}: Weather unavailable`;
+      return `Day ${index + 1} (${entry.date || 'date not available'}) in ${entry.city || destination}: condition=${entry.condition || 'unknown'}, avg_temp_c=${entry.avg_temp_c ?? 'n/a'}, min_temp_c=${entry.min_temp_c ?? 'n/a'}, max_temp_c=${entry.max_temp_c ?? 'n/a'}, humidity=${entry.avg_humidity ?? 'n/a'}%, rain_chance=${entry.daily_chance_of_rain ?? 'n/a'}%, precip_mm=${entry.total_precip_mm ?? 'n/a'}, wind_kph=${entry.max_wind_kph ?? 'n/a'}, uv=${entry.uv ?? 'n/a'}, sunrise=${entry.sunrise || 'n/a'}, sunset=${entry.sunset || 'n/a'}, alerts=${entry.alerts_summary || 'none'}`;
     })
     .join('\n');
   
@@ -23,6 +39,9 @@ TRIP DETAILS:
 - Budget: ₹${budget}
 
 CRITICAL INSTRUCTION: YOU MUST DISTRIBUTE ALL ${totalPlaces} SELECTED PLACES across the itinerary. Do not skip any places. Each place must appear as an activity in the itinerary.
+
+WEATHER INPUT YOU MUST USE (DO NOT INVENT OR REPLACE THESE VALUES):
+${weatherByDayText}
 
 MANDATORY NEARBY GROUPING (DO NOT VIOLATE):
 ${groupedByDayText}
@@ -65,22 +84,57 @@ IMPORTANT:
 - Use simple, readable format.
 - Keep each field brief to save tokens.
 - Distribute selected places across days reasonably.
-
-RESPONSE FORMAT (STRICTLY follow this JSON structure):
-{
+- For EACH day, weather and weather_note MUST reflect the weather input for that day.
+- For EACH activity description, explain in human tone why that place fits the day's weather using a simple practical reason.
+- Do not use generic weather statements like "good weather".
+- Write weather_note as a well-thought daily advisory in natural human tone (4 to 6 short sentences, roughly 70 to 120 words).
+- weather_note must include:
+  1) a plain-language weather summary,
+  2) practical planning advice (timing, pace, hydration, clothing, umbrellas/sun protection),
+  3) one caution if relevant (rain, heat, wind, alert).
+- Keep the advisory balanced: informative, calm, and actionable (not alarmist).
+- Do NOT repeat the same raw weather fields in weather_note that are already shown in the UI; focus on what the traveler should do differently today.
+- Avoid listing numbers unless they are genuinely important to the advice.
+- Favor advice phrases like "start early", "carry a light layer", "keep indoor options ready", "plan the longer stop first", or "take water breaks".
+- Make the advisory sound like a knowledgeable travel planner speaking to a traveler.
+- Prefer guidance such as when to go out, which parts of the day are easier, whether to slow down or keep a backup plan, and how to dress or pack.
+- Avoid phrases like "the forecast shows" or "weather data indicates"; sound natural and direct.
+- If conditions are pleasant, explain how to take advantage of them rather than repeating the conditions.
+- If conditions are less ideal, be calm and practical, not dramatic.
+- Include one sentence that tells the traveler how to structure the day better because of the weather.
+- Include one sentence that recommends the best time window for the main outdoor stop.
+- Include one sentence that adds a small practical tip people would actually use.
+- Aim for a compact advisory arc: 1) what today feels like, 2) what to do first, 3) what to avoid or delay, 4) a useful packing or pacing tip, 5) a brief final reassurance.
+- Keep the content advice-heavy and avoid turning the note into a weather report.
+- The note should feel like a short actionable briefing, not a list of measurements.
   "itinerary": [
     {
       "day": 1,
       "city": "City Name",
       "theme": "Theme/Category",
       "weather": "Clear/Rainy/Cloudy",
-      "weather_note": "Brief impact on plans",
+      "weather_note": "4-6 sentence human advisory focused on advice, not metric repetition",
+      "weather_details": {
+        "date": "YYYY-MM-DD",
+        "condition": "Partly cloudy",
+        "avg_temp_c": 0,
+        "min_temp_c": 0,
+        "max_temp_c": 0,
+        "avg_humidity": 0,
+        "daily_chance_of_rain": 0,
+        "total_precip_mm": 0,
+        "max_wind_kph": 0,
+        "uv": 0,
+        "sunrise": "6:12 AM",
+        "sunset": "6:44 PM",
+        "alerts_summary": "No severe alerts"
+      },
       "activities": [
         {
           "title": "Activity Name",
           "time": "9:00 AM - 11:00 AM",
           "duration_min": 120,
-          "description": "Brief desc",
+          "description": "Human-like explanation including weather-fit with numeric data",
           "type": "outdoor/indoor",
           "location": "Specific area"
         }

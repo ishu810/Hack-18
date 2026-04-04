@@ -136,6 +136,13 @@ function getSegmentTransitLabel(segment) {
   return `${timeLabel} • ${distanceLabel}`;
 }
 
+function formatMetric(value, suffix = '') {
+  if (value === null || value === undefined || value === '') return 'N/A';
+  const num = Number(value);
+  if (Number.isFinite(num)) return `${num}${suffix}`;
+  return `${value}${suffix}`;
+}
+
 export default function ItineraryPlannerPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -160,6 +167,7 @@ export default function ItineraryPlannerPage() {
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
   const [routeError, setRouteError] = useState('');
   const [toast, setToast] = useState(null);
+  const [openAdvisoryDayIndex, setOpenAdvisoryDayIndex] = useState(null);
 
   const toastTimerRef = useRef(null);
   const lastRemovedRef = useRef(null);
@@ -226,6 +234,18 @@ export default function ItineraryPlannerPage() {
   const activeDayMapPlaces = useMemo(() => selectedPlaces, [selectedPlaces]);
 
   const activeDay = days[activeDayIndex] || null;
+  const advisoryDay = openAdvisoryDayIndex === null ? null : days[openAdvisoryDayIndex] || null;
+
+  useEffect(() => {
+    if (openAdvisoryDayIndex === null) return;
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setOpenAdvisoryDayIndex(null);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [openAdvisoryDayIndex]);
 
   useEffect(() => {
     let cancelled = false;
@@ -803,9 +823,21 @@ export default function ItineraryPlannerPage() {
                   </div>
 
                   <div className="mt-4">
-                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Weather</p>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Weather</p>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenAdvisoryDayIndex((prev) => (prev === index ? null : index));
+                        }}
+                        className="rounded border border-cyan-400/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-500/20"
+                      >
+                        {openAdvisoryDayIndex === index ? 'Hide Advisory' : 'Weather Advisory'}
+                      </button>
+                    </div>
                     <p className="mt-1 text-base font-semibold text-cyan-100">{day.weather || 'Not specified'}</p>
-                    {day.weather_note ? <p className="mt-1 text-sm text-cyan-100/90">{day.weather_note}</p> : null}
+
                   </div>
 
                   <div className="mt-5 grid gap-6 md:grid-cols-2">
@@ -909,6 +941,73 @@ export default function ItineraryPlannerPage() {
           </Link>
         </div>
       </div>
+
+      {advisoryDay ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpenAdvisoryDayIndex(null)}
+            className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-[1px]"
+            aria-label="Close weather advisory"
+          />
+          <aside className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto border-l border-cyan-300/25 bg-slate-950/95 p-5 shadow-2xl">
+            <div className="mx-auto max-w-lg">
+              <div className="flex items-start justify-between gap-3 border-b border-cyan-300/20 pb-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-cyan-200">Weather Advisory</p>
+                  <h3 className="mt-1 text-xl font-semibold text-cyan-50">Day {advisoryDay.day || (openAdvisoryDayIndex + 1)} • {advisoryDay.city || 'Unknown city'}</h3>
+                  <p className="mt-1 text-sm text-cyan-100">{advisoryDay.weather || 'Not specified'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOpenAdvisoryDayIndex(null)}
+                  className="rounded border border-cyan-300/30 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-500/20"
+                >
+                  Close
+                </button>
+              </div>
+
+              <section className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-500/10 p-4 text-cyan-50">
+                <p className="text-xs uppercase tracking-[0.14em] text-cyan-200">Daily Data</p>
+                <div className="mt-2 grid gap-2 text-xs sm:grid-cols-2">
+                  <p>Date: {advisoryDay.weather_details?.date || 'N/A'}</p>
+                  <p>Condition: {advisoryDay.weather_details?.condition || 'N/A'}</p>
+                  <p>Temp (min-max): {formatMetric(advisoryDay.weather_details?.min_temp_c, 'C')} to {formatMetric(advisoryDay.weather_details?.max_temp_c, 'C')}</p>
+                  <p>Average Temp: {formatMetric(advisoryDay.weather_details?.avg_temp_c, 'C')}</p>
+                  <p>Humidity: {formatMetric(advisoryDay.weather_details?.avg_humidity, '%')}</p>
+                  <p>Rain Chance: {formatMetric(advisoryDay.weather_details?.daily_chance_of_rain, '%')}</p>
+                  <p>Sunrise/Sunset: {advisoryDay.weather_details?.sunrise || 'N/A'} / {advisoryDay.weather_details?.sunset || 'N/A'}</p>
+                </div>
+                <p className="mt-2 text-xs text-cyan-100/80">Alerts: {advisoryDay.weather_details?.alerts_summary || 'No severe alerts'}</p>
+              </section>
+
+              <section className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/10 p-4 text-amber-50">
+                <p className="text-xs uppercase tracking-[0.14em] text-amber-200">Human Advisory</p>
+                <p className="mt-2 text-sm leading-relaxed text-amber-100/95 whitespace-pre-line">
+                  {advisoryDay.weather_note || 'No advisory narrative available for this day.'}
+                </p>
+              </section>
+
+              <section className="mt-4 rounded-xl border border-emerald-300/20 bg-emerald-500/10 p-4 text-emerald-50">
+                <p className="text-xs uppercase tracking-[0.14em] text-emerald-200">Why Today\'s Stops Fit</p>
+                {(advisoryDay.activities || []).some((activity) => Boolean(activity?.description)) ? (
+                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-emerald-100/95">
+                    {(advisoryDay.activities || [])
+                      .map((activity) => activity?.description)
+                      .filter(Boolean)
+                      .slice(0, 3)
+                      .map((description, descriptionIndex) => (
+                        <li key={`advisory-panel-${openAdvisoryDayIndex}-${descriptionIndex}`}>{description}</li>
+                      ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-emerald-100/95">No place-level advisory notes available.</p>
+                )}
+              </section>
+            </div>
+          </aside>
+        </>
+      ) : null}
 
       {toast ? (
         <div className="fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border border-slate-700 bg-slate-900/95 p-3 shadow-xl">

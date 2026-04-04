@@ -13,11 +13,185 @@ const getGeoapifyKey = () => {
   return raw.trim();
 };
 
+const getWeatherApiKey = () => {
+  const raw = process.env.WEATHERAPI_KEY || process.env.WEATHER_API_KEY || '';
+  return raw.trim();
+};
+
 const maskKey = (value = '') => {
   const key = String(value || '').trim();
   if (!key) return '[missing]';
   if (key.length <= 10) return `${key.slice(0, 3)}***`;
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
+};
+
+const normalizeForecastDate = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
+};
+
+const buildTripDateList = (dates = [], tripDays = 1) => {
+  const days = Math.max(1, Number(tripDays) || 1);
+  const startRaw = Array.isArray(dates) && dates.length ? dates[0] : null;
+  const start = startRaw ? new Date(startRaw) : new Date();
+
+  if (Number.isNaN(start.getTime())) {
+    const today = new Date();
+    return Array.from({ length: days }, (_, index) => {
+      const date = new Date(today);
+      date.setUTCDate(today.getUTCDate() + index);
+      return date.toISOString().slice(0, 10);
+    });
+  }
+
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(start);
+    date.setUTCDate(start.getUTCDate() + index);
+    return date.toISOString().slice(0, 10);
+  });
+};
+
+const summarizeWeatherForNarrative = (details = {}) => {
+  const condition = details.condition || 'Unknown conditions';
+  const avg = Number.isFinite(details.avg_temp_c) ? `${details.avg_temp_c}C avg` : 'temp N/A';
+  const rain = Number.isFinite(details.daily_chance_of_rain) ? `${details.daily_chance_of_rain}% rain chance` : 'rain chance N/A';
+  const wind = Number.isFinite(details.max_wind_kph) ? `${details.max_wind_kph} kph winds` : 'wind N/A';
+  return `${condition}, ${avg}, ${rain}, ${wind}`;
+};
+
+const formatWeatherHeadline = (details = {}) => {
+  const condition = details.condition || 'Forecast unavailable';
+  const min = Number.isFinite(details.min_temp_c) ? `${details.min_temp_c}C` : 'N/A';
+  const max = Number.isFinite(details.max_temp_c) ? `${details.max_temp_c}C` : 'N/A';
+  const rain = Number.isFinite(details.daily_chance_of_rain) ? `${details.daily_chance_of_rain}%` : 'N/A';
+  return `${condition} | ${min}-${max} | Rain ${rain}`;
+};
+
+const formatWeatherNote = (details = {}) => {
+  const parts = [];
+  if (Number.isFinite(details.avg_temp_c)) parts.push(`Average ${details.avg_temp_c}C`);
+  if (Number.isFinite(details.avg_humidity)) parts.push(`Humidity ${details.avg_humidity}%`);
+  if (Number.isFinite(details.total_precip_mm)) parts.push(`Precipitation ${details.total_precip_mm} mm`);
+  if (Number.isFinite(details.max_wind_kph)) parts.push(`Max wind ${details.max_wind_kph} kph`);
+  if (Number.isFinite(details.uv)) parts.push(`UV ${details.uv}`);
+  if (details.sunrise || details.sunset) parts.push(`Sunrise ${details.sunrise || 'N/A'} / Sunset ${details.sunset || 'N/A'}`);
+  if (details.alerts_summary) parts.push(`Alerts: ${details.alerts_summary}`);
+  return parts.join(' | ');
+};
+
+const isMetricHeavyNarrative = (text = '') => {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const metricMatches = value.match(/\b\d+(?:\.\d+)?\s?(?:c|°c|f|%|mm|kph|km|uv|hrs?|minutes?)\b/gi) || [];
+  const separatorMatches = value.match(/[|;]/g) || [];
+  return metricMatches.length >= 3 || separatorMatches.length >= 2;
+};
+
+const buildAdviceOnlyNarrative = (details = {}) => {
+  const condition = String(details?.condition || 'today').toLowerCase();
+  const opening = condition.includes('rain')
+    ? 'Plan the outdoor part early and keep an indoor stop ready if the rain picks up later.'
+    : condition.includes('cloud')
+      ? 'Use the softer weather to cover the main sights first and keep the afternoon flexible.'
+      : condition.includes('sun') || condition.includes('clear')
+        ? 'Start with the bigger outdoor stop while the day is easier, then move into slower sightseeing later.'
+        : 'Keep the day flexible and decide the pace based on how the weather feels by mid-morning.';
+
+  const middle = 'Break the day into one strong outdoor block and one easier backup block so you do not feel rushed.';
+  const tip = condition.includes('rain')
+    ? 'Carry a compact umbrella and choose lunch spots that are easy to reach without a long walk.'
+    : condition.includes('sun') || condition.includes('clear')
+      ? 'Keep water handy and take short shade breaks so the sightseeing stays comfortable.'
+      : 'A light layer and a relaxed pace will help you stay comfortable through the day.';
+  const close = 'Overall, this is still a good day for sightseeing if you keep the timing smart and stay a little flexible.';
+
+  return [opening, middle, tip, close].join(' ');
+};
+
+const mergeWeatherNarrative = (narrative = '', details = {}) => {
+  const text = String(narrative || '').trim();
+  if (text && !isMetricHeavyNarrative(text)) return text;
+  if (text && isMetricHeavyNarrative(text)) return buildAdviceOnlyNarrative(details);
+  return buildAdviceOnlyNarrative(details);
+};
+
+const getFallbackWeatherReason = (place, details = {}) => {
+  const placeName = place?.name || 'This stop';
+  const condition = details.condition || 'today\'s weather';
+  const rain = Number.isFinite(details.daily_chance_of_rain) ? `${details.daily_chance_of_rain}%` : 'unknown';
+  const avg = Number.isFinite(details.avg_temp_c) ? `${details.avg_temp_c}C` : 'unknown';
+  const wind = Number.isFinite(details.max_wind_kph) ? `${details.max_wind_kph} kph` : 'unknown';
+  return `${placeName} is a smart pick today because the forecast shows ${condition} with around ${avg} average temperature, ${rain} rain chance, and winds near ${wind}, making this stop practical and comfortable in the expected conditions.`;
+};
+
+const fetchWeatherForCity = async ({ city, tripDays }) => {
+  const key = getWeatherApiKey();
+  if (!key || !city) return null;
+
+  const cappedDays = Math.max(1, Math.min(14, Number(tripDays) || 1));
+  const response = await axios.get('https://api.weatherapi.com/v1/forecast.json', {
+    params: {
+      key,
+      q: city,
+      days: cappedDays,
+      aqi: 'yes',
+      alerts: 'yes'
+    },
+    timeout: 12000
+  });
+
+  return response.data || null;
+};
+
+const buildWeatherByDayInput = async ({ groupedPlacesByDay = [], tripDates = [], tripDays = 1, destination = '' }) => {
+  const cityByDay = groupedPlacesByDay.map((dayPlaces) => dayPlaces?.[0]?.location || destination || '');
+  const uniqueCities = [...new Set(cityByDay.map((city) => String(city || '').trim()).filter(Boolean))];
+  const weatherByCity = new Map();
+
+  await Promise.all(uniqueCities.map(async (city) => {
+    try {
+      const data = await fetchWeatherForCity({ city, tripDays });
+      if (data) weatherByCity.set(city.toLowerCase(), data);
+    } catch (error) {
+      console.warn(`WeatherAPI fetch failed for ${city}:`, error?.response?.data || error?.message || error);
+    }
+  }));
+
+  const dayDates = buildTripDateList(tripDates, tripDays);
+
+  return dayDates.map((dateLabel, index) => {
+    const city = cityByDay[index] || destination || '';
+    const weatherPayload = weatherByCity.get(city.toLowerCase());
+    const forecastDays = weatherPayload?.forecast?.forecastday || [];
+    const alerts = weatherPayload?.alerts?.alert || [];
+
+    let forecast = forecastDays.find((entry) => normalizeForecastDate(entry?.date) === dateLabel) || null;
+    if (!forecast) forecast = forecastDays[index] || forecastDays[forecastDays.length - 1] || null;
+
+    const day = forecast?.day || {};
+    const astro = forecast?.astro || {};
+    const detail = {
+      date: dateLabel,
+      city,
+      condition: day?.condition?.text || '',
+      avg_temp_c: toFiniteNumber(day?.avgtemp_c),
+      min_temp_c: toFiniteNumber(day?.mintemp_c),
+      max_temp_c: toFiniteNumber(day?.maxtemp_c),
+      avg_humidity: toFiniteNumber(day?.avghumidity),
+      daily_chance_of_rain: toFiniteNumber(day?.daily_chance_of_rain),
+      total_precip_mm: toFiniteNumber(day?.totalprecip_mm),
+      max_wind_kph: toFiniteNumber(day?.maxwind_kph),
+      uv: toFiniteNumber(day?.uv),
+      sunrise: astro?.sunrise || '',
+      sunset: astro?.sunset || '',
+      alerts_summary: alerts.length
+        ? alerts.slice(0, 2).map((alert) => `${alert?.event || 'Weather alert'} (${alert?.severity || 'unknown severity'})`).join('; ')
+        : 'No severe alerts'
+    };
+
+    return detail;
+  });
 };
 
 const llm = new ChatOpenAI({
@@ -761,6 +935,7 @@ const asString = (value, fallback = '') => {
 };
 
 const asNumber = (value, fallback = 0) => {
+  if (value === null || value === undefined || value === '') return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 };
@@ -769,6 +944,7 @@ const normalizeItineraryForSave = (rawData) => {
   const data = asObject(rawData) || {};
   const days = asArray(data.itinerary).map((day, index) => {
     const d = asObject(day) || {};
+    const weatherDetailsObj = asObject(d.weather_details) || {};
 
     const activities = asArray(d.activities).map((activity) => {
       const a = asObject(activity) || {};
@@ -810,6 +986,21 @@ const normalizeItineraryForSave = (rawData) => {
       theme: asString(d.theme),
       weather: asString(d.weather),
       weather_note: asString(d.weather_note),
+      weather_details: {
+        date: asString(weatherDetailsObj.date),
+        condition: asString(weatherDetailsObj.condition),
+        avg_temp_c: asNumber(weatherDetailsObj.avg_temp_c, null),
+        min_temp_c: asNumber(weatherDetailsObj.min_temp_c, null),
+        max_temp_c: asNumber(weatherDetailsObj.max_temp_c, null),
+        avg_humidity: asNumber(weatherDetailsObj.avg_humidity, null),
+        daily_chance_of_rain: asNumber(weatherDetailsObj.daily_chance_of_rain, null),
+        total_precip_mm: asNumber(weatherDetailsObj.total_precip_mm, null),
+        max_wind_kph: asNumber(weatherDetailsObj.max_wind_kph, null),
+        uv: asNumber(weatherDetailsObj.uv, null),
+        sunrise: asString(weatherDetailsObj.sunrise),
+        sunset: asString(weatherDetailsObj.sunset),
+        alerts_summary: asString(weatherDetailsObj.alerts_summary)
+      },
       activities,
       travel: travelObj ? {
         from: asString(travelObj.from),
@@ -837,6 +1028,57 @@ const normalizeItineraryForSave = (rawData) => {
     packing_tips: asArray(data.packing_tips).map((tip) => asString(tip)).filter(Boolean),
     best_time_to_visit: asString(data.best_time_to_visit)
   };
+};
+
+const applyWeatherToItineraryData = ({ normalizedItinerary, weatherByDay = [], groupedPlacesByDay = [] }) => {
+  const next = {
+    ...normalizedItinerary,
+    itinerary: (normalizedItinerary?.itinerary || []).map((day, index) => {
+      const details = weatherByDay[index] || {};
+      const mergedDetails = {
+        date: details.date || day?.weather_details?.date || '',
+        condition: details.condition || day?.weather_details?.condition || '',
+        avg_temp_c: Number.isFinite(details.avg_temp_c) ? details.avg_temp_c : day?.weather_details?.avg_temp_c ?? null,
+        min_temp_c: Number.isFinite(details.min_temp_c) ? details.min_temp_c : day?.weather_details?.min_temp_c ?? null,
+        max_temp_c: Number.isFinite(details.max_temp_c) ? details.max_temp_c : day?.weather_details?.max_temp_c ?? null,
+        avg_humidity: Number.isFinite(details.avg_humidity) ? details.avg_humidity : day?.weather_details?.avg_humidity ?? null,
+        daily_chance_of_rain: Number.isFinite(details.daily_chance_of_rain) ? details.daily_chance_of_rain : day?.weather_details?.daily_chance_of_rain ?? null,
+        total_precip_mm: Number.isFinite(details.total_precip_mm) ? details.total_precip_mm : day?.weather_details?.total_precip_mm ?? null,
+        max_wind_kph: Number.isFinite(details.max_wind_kph) ? details.max_wind_kph : day?.weather_details?.max_wind_kph ?? null,
+        uv: Number.isFinite(details.uv) ? details.uv : day?.weather_details?.uv ?? null,
+        sunrise: details.sunrise || day?.weather_details?.sunrise || '',
+        sunset: details.sunset || day?.weather_details?.sunset || '',
+        alerts_summary: details.alerts_summary || day?.weather_details?.alerts_summary || ''
+      };
+
+      const weatherHeadline = formatWeatherHeadline(mergedDetails);
+      const weatherNote = mergeWeatherNarrative(day.weather_note, mergedDetails);
+
+      const dayPlaces = groupedPlacesByDay[index] || [];
+      const activities = (day.activities || []).map((activity, activityIndex) => {
+        const existingDescription = (activity?.description || '').trim();
+        const hasNumericWeatherEvidence = /\d+\s?(?:%|mm|kph|c|C|km|uv)/.test(existingDescription);
+        if (hasNumericWeatherEvidence) return activity;
+
+        const fallbackPlace = dayPlaces[activityIndex] || dayPlaces[0] || null;
+        return {
+          ...activity,
+          description: getFallbackWeatherReason(fallbackPlace || { name: activity?.title }, mergedDetails)
+        };
+      });
+
+      return {
+        ...day,
+        city: day.city || details.city || '',
+        weather: weatherHeadline,
+        weather_note: weatherNote,
+        weather_details: mergedDetails,
+        activities
+      };
+    })
+  };
+
+  return next;
 };
 
 const createTrip = asyncHandler(async (req, res) => {
@@ -1186,6 +1428,21 @@ const generateItinerary = asyncHandler(async (req, res) => {
   console.log('✅ Trip status is valid (places_selected)');
   const tripDays = getTripDaysFromDates(trip.dates);
   const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays);
+  const weatherByDay = await buildWeatherByDayInput({
+    groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
+    tripDates: trip.dates,
+    tripDays,
+    destination: trip.destination
+  });
+
+  console.log('✅ Weather input prepared for itinerary:', weatherByDay.map((item, index) => ({
+    day: index + 1,
+    city: item.city,
+    date: item.date,
+    condition: item.condition,
+    avg_temp_c: item.avg_temp_c,
+    rain: item.daily_chance_of_rain
+  })));
 
   const prompt = buildItineraryPrompt({
     origin: trip.origin,
@@ -1193,6 +1450,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
     days: tripDays,
     selectedPlaces: groupedPlan.orderedPlaces,
     groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
+    weatherByDay,
     budget: trip.budget,
     dates: trip.dates
   });
@@ -1203,12 +1461,16 @@ const generateItinerary = asyncHandler(async (req, res) => {
   try {
     console.log('🔄 Calling LLM...');
     const response = await llm.invoke(prompt);
-    const content = response.content || response.text || '{}';
+    const content = (response.content || response.text || '{}').toString();
+    const cleaned = content
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
     
     console.log('✅ LLM response received, length:', content.length);
     console.log('📝 Response preview:', content.substring(0, 200));
     
-    itineraryData = JSON.parse(content);
+    itineraryData = JSON.parse(cleaned);
     console.log('✅ Response parsed successfully');
     console.log('📊 Itinerary days:', itineraryData.itinerary?.length);
   } catch (error) {
@@ -1248,12 +1510,14 @@ const generateItinerary = asyncHandler(async (req, res) => {
           });
         }
 
+        const dayWeather = weatherByDay[index] || {};
         return {
           day: index + 1,
           city: currentCity,
           theme: firstPlace?.type || 'Sightseeing',
-          weather: 'Clear',
-          weather_note: 'Good conditions',
+          weather: formatWeatherHeadline(dayWeather),
+          weather_note: formatWeatherNote(dayWeather) || summarizeWeatherForNarrative(dayWeather),
+          weather_details: dayWeather,
           activities,
           travel: isTransferDay ? {
             from: previousCity,
@@ -1308,9 +1572,14 @@ const generateItinerary = asyncHandler(async (req, res) => {
 
   try {
     const normalizedItinerary = normalizeItineraryForSave(itineraryData);
-    console.log('✅ Normalized itinerary days:', normalizedItinerary.itinerary.length);
+    const weatherAwareItinerary = applyWeatherToItineraryData({
+      normalizedItinerary,
+      weatherByDay,
+      groupedPlacesByDay: groupedPlan.groupedPlacesByDay
+    });
+    console.log('✅ Normalized itinerary days:', weatherAwareItinerary.itinerary.length);
 
-    trip.itinerary = normalizedItinerary;
+    trip.itinerary = weatherAwareItinerary;
     trip.status = 'itinerary_generated';
     const savedTrip = await trip.save();
     
