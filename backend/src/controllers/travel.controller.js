@@ -353,10 +353,260 @@ const generateItinerary = asyncHandler(async (req, res) => {
     });
       }
 });
+
+const enforceDestinationPriority = ({ selected = [], candidates = [], destination = '', maxCount = 12, days = 1 }) => {
+  const destinationKey = normalizePlaceName(destination);
+  const intermediates = [...new Set(
+    candidates
+      .map((item) => normalizePlaceName(item?.location))
+      .filter((loc) => loc && loc !== destinationKey)
+  )];
+
+  const scoreSort = (a, b) => {
+    const scoreA = (Number(a?.popularity) || 0) + (Number(a?.rating) || 0);
+    const scoreB = (Number(b?.popularity) || 0) + (Number(b?.rating) || 0);
+    return scoreB - scoreA;
+  };
+
+  const byLocation = (list, locationKey) => list.filter((item) => normalizePlaceName(item?.location) === locationKey).sort(scoreSort);
+
+  const selectedSorted = [...selected].sort(scoreSort);
+  const candidateSorted = [...candidates].sort(scoreSort);
+
+  const destinationPool = [...byLocation(selectedSorted, destinationKey), ...byLocation(candidateSorted, destinationKey)];
+  const intermediatePools = new Map(intermediates.map((loc) => [
+    loc,
+    [...byLocation(selectedSorted, loc), ...byLocation(candidateSorted, loc)]
+  ]));
+
+  const perIntermediateCap = 2;
+  const destinationCap = days === 3
+    ? Math.min(maxCount, 5)
+    : Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
+
+  const finalList = [];
+  const used = new Set();
+
+  const pushUnique = (items, cap = Infinity) => {
+    for (const item of items) {
+      const key = `${normalizePlaceName(item?.name)}|${normalizePlaceName(item?.location)}`;
+      if (!item?.name || used.has(key)) continue;
+      used.add(key);
+      finalList.push(item);
+      if (finalList.length >= maxCount || cap <= 1) return;
+      cap -= 1;
+    }
+  };
+
+  // Fill destination first with strict cap (e.g. 3 days -> max 5 destination places).
+  pushUnique(destinationPool, destinationCap);
+
+  // Add limited intermediate picks (max 2 per intermediate city).
+  for (const loc of intermediates) {
+    if (finalList.length >= maxCount) break;
+    const room = Math.min(perIntermediateCap, maxCount - finalList.length);
+    pushUnique(intermediatePools.get(loc) || [], room);
+  }
+
+  // Fill remaining slots while respecting per-location caps.
+  if (finalList.length < maxCount) {
+    const locationCounts = new Map();
+    finalList.forEach((item) => {
+      const key = normalizePlaceName(item?.location);
+      locationCounts.set(key, (locationCounts.get(key) || 0) + 1);
+    });
+
+    for (const item of candidateSorted) {
+      if (finalList.length >= maxCount) break;
+      const locKey = normalizePlaceName(item?.location);
+      const currentCount = locationCounts.get(locKey) || 0;
+      const isDestination = locKey === destinationKey;
+      const locCap = isDestination ? destinationCap : perIntermediateCap;
+      if (currentCount >= locCap) continue;
+
+      const key = `${normalizePlaceName(item?.name)}|${locKey}`;
+      if (!item?.name || used.has(key)) continue;
+
+      used.add(key);
+      finalList.push(item);
+      locationCounts.set(locKey, currentCount + 1);
+    }
+  }
+
+  return finalList
+    .slice(0, maxCount)
+    .map((item) => ({
+      ...item,
+      type: item.type || 'attraction',
+      best_visit_reason: (item.best_visit_reason || '').trim() || `Popular highlight near ${item.location}.`
+    }));
+};
+
+const fallbackSelectPlaces = (candidates, maxCount, destination, days = 1) => {
+  const seen = new Set();
+  const baseline = candidates
+    .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+    .filter((candidate) => {
+      const normalized = normalizePlaceName(candidate.name);
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, maxCount)
+    .map((candidate) => ({
+      ...candidate,
+      type: candidate.type || 'attraction',
+      best_visit_reason: candidate.best_visit_reason || `Popular highlight near ${candidate.location}.`
+    }));
+
+  return enforceDestinationPriority({
+    selected: baseline,
+    candidates,
+    destination,
+    maxCount,
+    days,
+  });
+};
+
+const selectPlacesWithLLM = async ({ candidates, maxCount, days, destination }) => {
+  if (!candidates.length) return [];
+
+  const intermediateLocations = [...new Set(
+    candidates
+      .map((item) => normalizePlaceName(item?.location))
+      .filter((loc) => loc && loc !== normalizePlaceName(destination))
+  )];
+
+  const destinationCap = days === 3
+    ? Math.min(maxCount, 5)
+    : Math.min(maxCount, Math.ceil((maxCount * 5) / 9));
+  const prompt = `You are a strict travel selection engine. Return ONLY a valid JSON array and nothing else.
+
+Goal: pick only high-value tourist attractions that feel diverse and memorable.
+
+Hard rules:
+1) Output length MUST be <= ${maxCount}.
+2) For destination "${destination}", select at most ${destinationCap} places.
+3) For EACH intermediate checkpoint, select at most 2 places.
+4) Keep places geographically correct to their checkpoint location.
+5) Do not relocate places to wrong cities (example: Agra Fort must not be mapped to Mathura).
+6) Prefer famous/popular attractions first, then balance categories for varied feel.
+7) Sort output by priority descending: popularity + rating + tourist significance.
+8) Avoid duplicates and near-duplicates.
+
+Important: if the input contains both famous and lesser-known places for the same city, prefer the famous and more established tourist attractions.
+
+Trip days: ${days}
+Intermediate checkpoints: ${JSON.stringify(intermediateLocations)}
+
+Input candidates (already pre-ranked by popularity, rating, and tourist significance):
+${JSON.stringify(candidates)}
+
+Output JSON schema:
+[
+  {
+    "name": "Place Name",
+    "location": "Checkpoint Name",
+    "lat": 0,
+    "lng": 0,
+    "type": "landmark",
+    "rating": 0,
+    "popularity": 0,
+    "best_visit_reason": "one concise line"
+  }
+]`;
+
+  const response = await llm.invoke(prompt);
+  const raw = (response.content || response.text || '').toString().trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const parsed = JSON.parse(raw);
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('LLM output is not an array.');
+  }
+
+  return parsed;
+};
+
+const buildQueryVariants = (placeName, location, type) => {
+  const safePlace = (placeName || '').trim();
+  const safeLocation = (location || '').trim();
+  const safeType = (type || '').trim();
+
+  const normalize = (value) => value
+    .replace(/[-_/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const placeNorm = normalize(safePlace);
+  const locationNorm = normalize(safeLocation);
+  const placeNoStopwords = placeNorm
+    .replace(/\b(the|of|de|la|le|ki|ka|and)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const candidates = [
+    `${placeNorm} ${locationNorm}`,
+    `${placeNorm} ${locationNorm} landmark`,
+    `${placeNorm} ${locationNorm} travel`,
+    `${placeNorm} ${locationNorm} tourism`,
+    `${placeNorm} ${locationNorm} ${safeType}`,
+    `${placeNoStopwords} ${locationNorm}`,
+    placeNorm,
+    `${placeNorm} landmark`,
+    `${placeNorm} travel`,
+    locationNorm,
+    `${locationNorm} city`,
+    `${locationNorm} tourism`
+  ].map(normalize).filter(Boolean);
+
+  return [...new Set(candidates)];
+};
+
+const getUnsplashImage = async (queries, label) => {
+  if (!process.env.UNSPLASH_ACCESS_KEY) return null;
+
+  const queryList = Array.isArray(queries) ? queries : [queries];
+
+  for (const q of queryList) {
+    try {
+      const response = await axios.get('https://api.unsplash.com/search/photos', {
+        params: {
+          query: q.trim(),
+          per_page: 3
+        },
+        headers: {
+          Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`
+        },
+        timeout: 8000
+      });
+
+      const image = response.data?.results?.find((r) => r?.urls?.regular || r?.urls?.full || r?.urls?.raw || r?.urls?.small || r?.urls?.thumb || r?.urls?.small_s3);
+      if (image) {
+        const chosen = image?.urls?.regular || image?.urls?.full || image?.urls?.raw || image?.urls?.small || image?.urls?.thumb || image?.urls?.small_s3 || null;
+        if (chosen) {
+          console.log(`Unsplash image for "${label || q}" found via query "${q}":`, chosen);
+          return chosen;
+        }
+      }
+    } catch (e) {
+      console.warn(`Unsplash query "${q}" failed:`, e.message || e);
+    }
+  }
+
+  console.warn('Unsplash: all query strategies exhausted for', label || queryList[0]);
+  return null;
+};
+
+
 export{
   
+  
   selectPlaces,
-  generateItinerary
+  generateItinerary,
+  getUnsplashImage,
+  buildQueryVariants,
+  selectPlacesWithLLM,
+  fallbackSelectPlaces,
   
 
 }
