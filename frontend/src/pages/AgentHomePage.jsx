@@ -4,9 +4,8 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { computeRoute, createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
+import { createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
 import PlacesMap from '../components/PlacesMap';
-import { buildRouteMetrics } from '../utils/routeMath';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -199,6 +198,30 @@ function distanceKmCoords(a, b) {
   return 6371 * 2 * Math.atan2(Math.sqrt(aVal), Math.sqrt(1 - aVal));
 }
 
+function summarizeOrderedRoute(route) {
+  const points = (Array.isArray(route) ? route : [])
+    .map((point) => ({
+      lat: Number(point?.lat),
+      lng: Number(point?.lng ?? point?.lon),
+    }))
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+
+  if (points.length < 2) {
+    return { totalDistance: 0, estimatedHours: 0 };
+  }
+
+  let totalDistance = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    totalDistance += distanceKmCoords(points[index], points[index + 1]);
+  }
+
+  const estimatedHours = Math.max(1, Math.round((totalDistance / 50) * 10) / 10);
+  return {
+    totalDistance: Math.max(1, Math.round(totalDistance)),
+    estimatedHours,
+  };
+}
+
 function findBestRoute(origin, destination, stops) {
   const rem = [...stops], ordered = [origin];
   let current = origin, total = 0;
@@ -213,23 +236,8 @@ function findBestRoute(origin, destination, stops) {
   }
   total += distanceKmCoords(current, destination);
   ordered.push(destination);
-  // Estimate hours at 50 km/h average speed
-  const estimatedHours = Math.max(1, Math.round((total / 50) * 10) / 10);
-  return { route: ordered, totalDistance: Math.round(total), estimatedHours };
-}
-
-function formatDurationFromMinutes(totalMinutes = 0) {
-  const mins = Math.max(1, Math.round(Number(totalMinutes) || 0));
-  if (mins < 60) return `${mins} min`;
-  const hours = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return rem ? `${hours}h ${rem}m` : `${hours}h`;
-}
-
-function buildWaypointHash(points = []) {
-  return points
-    .map((point) => `${Number(point?.lat).toFixed(5)},${Number(point?.lng).toFixed(5)}`)
-    .join('|');
+  const metrics = summarizeOrderedRoute(ordered);
+  return { route: ordered, ...metrics };
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
@@ -261,9 +269,6 @@ export default function AgentHomePage() {
   const [hiddenPlaces, setHiddenPlaces] = useState({});
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
-  const [routeLoading, setRouteLoading] = useState(false);
-  const [liveRouteMetrics, setLiveRouteMetrics] = useState(null);
-  const [liveRouteMetricsLoading, setLiveRouteMetricsLoading] = useState(false);
 
   // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
@@ -334,74 +339,31 @@ export default function AgentHomePage() {
   const availablePreviewStopOptions = previewStopSuggestions.filter((p) => !previewSelectedNames.has(p.name));
   const occupiedEditNames = new Set(activeRoute.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
   const availableEditStopOptions = editStopSuggestions.filter((p) => !occupiedEditNames.has(p.name));
-  const routeMapPoints = useMemo(() => activeRoute
+  const routeMapPoints = activeRoute
     .map((p) => ({
       ...p,
       lat: Number(p?.lat),
       lng: Number(p?.lng ?? p?.lon),
     }))
-    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)), [activeRoute]);
-  const routeMapPath = useMemo(() => routeMapPoints.map((p) => [p.lat, p.lng]), [routeMapPoints]);
-  const finalizedRouteHash = JSON.stringify(finalizedRoute.map((p) => ({ name: p.name, lat: p.lat, lng: p.lng })));
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
 
-  useEffect(() => {
-    // Only compute metrics when in Step 2 and have a valid route with 2+ points
-    if (currentStep !== 2 || !result || routeMapPoints.length < 2) {
-      setLiveRouteMetrics(null);
-      return;
-    }
+  const commitRouteChange = (nextRoute) => {
+    const next = Array.isArray(nextRoute) ? nextRoute : [];
+    setFinalizedRoute(next);
 
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        setLiveRouteMetricsLoading(true);
-        const response = await computeRoute({
-          waypoints: routeMapPoints.map((point) => ({ lat: point.lat, lng: point.lng })),
-          mode: 'drive',
-          options: {},
-        });
+    if (!result) return;
 
-        if (cancelled) return;
-        
-        // Extract metrics from response
-        const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-        
-        // Always set metrics, even if zero (so they don't fall back to old values)
-        setLiveRouteMetrics(metrics);
-      } catch (err) {
-        if (!cancelled) {
-          // On error, set empty metrics so it falls back to result values
-          setLiveRouteMetrics(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setLiveRouteMetricsLoading(false);
-        }
-      }
-    }, 280);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [currentStep, result, routeMapPoints, finalizedRouteHash]);
-
-  const effectiveDistanceKm = liveRouteMetrics?.distanceKm > 0
-    ? Math.max(1, Math.round(liveRouteMetrics.distanceKm))
-    : Number(result?.totalDistance || 0);
-  
-  // Prefer actual duration from API if available, otherwise use estimated
-  let effectiveMinutes = 0;
-  if (liveRouteMetrics?.durationSeconds > 0) {
-    effectiveMinutes = Math.round(liveRouteMetrics.durationSeconds / 60);
-  } else if (liveRouteMetrics?.estimatedMinutes > 0) {
-    effectiveMinutes = liveRouteMetrics.estimatedMinutes;
-  }
-  
-  const effectiveDurationLabel = effectiveMinutes > 0
-    ? formatDurationFromMinutes(effectiveMinutes)
-    : `${Math.max(1, Number(result?.estimatedHours || 1))} hrs`;
+    const metrics = summarizeOrderedRoute(next);
+    setResult((prev) => (prev ? {
+      ...prev,
+      route: next,
+      totalDistance: metrics.totalDistance,
+      estimatedHours: metrics.estimatedHours,
+      routeMetrics: metrics,
+    } : prev));
+  };
 
   const getNightLabel = (place, index) => {
     const n = Number(place?.nights);
@@ -442,7 +404,7 @@ export default function AgentHomePage() {
     const next = [...src];
     const [m] = next.splice(from, 1);
     next.splice(to, 0, m);
-    setFinalizedRoute(next);
+    commitRouteChange(next);
   };
 
   const editRoutePoint = (index) => {
@@ -463,7 +425,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     const point = src[index];
     if (!point || getPlaceLabel(point) === getPlaceLabel(origin)) return;
-    setFinalizedRoute(src.filter((_, i) => i !== index));
+    commitRouteChange(src.filter((_, i) => i !== index));
   };
 
   const addPreviewDestination = () => {
@@ -480,7 +442,7 @@ export default function AgentHomePage() {
       nights: Math.max(1, Number(previewNights || 1)),
     };
     setError('');
-    setFinalizedRoute([...src, newPoint]);
+    commitRouteChange([...src, newPoint]);
     setPreviewStop(null); setPreviewStopInput(''); setPreviewNights(1);
     setShowPreviewAddBox(false); setDragRouteIndex(null);
   };
@@ -492,7 +454,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     if (editingRouteIndex < 0 || editingRouteIndex >= src.length) return;
     setError('');
-    setFinalizedRoute(src.map((item, i) =>
+    commitRouteChange(src.map((item, i) =>
       i === editingRouteIndex
         ? { ...item, name: nextName, lat: editStopSelection?.lat ?? item.lat, lng: editStopSelection?.lng ?? item.lng, nights: Math.max(1, Number(editNights || 1)) }
         : item
@@ -501,79 +463,29 @@ export default function AgentHomePage() {
   };
 
   // ── Build journey ──
-  const buildJourney = async () => {
+  const buildJourney = () => {
     setError(''); setPlacesError(''); setCheckpointPlaces({}); setPlacesRequestKey(''); setHiddenPlaces({});
     if (!origin || !destination) { setError('Select valid start and destination cities from suggestions.'); return; }
     if (origin.name === destination.name) { setError('Origin and destination must be different.'); return; }
     if (!departureDate || !comingDate) { setError('Please add both departure and coming dates.'); return; }
     if (new Date(comingDate) < new Date(departureDate)) { setError('Coming date must be after departure date.'); return; }
     const optimized = findBestRoute(origin, destination, stops);
-    setRouteLoading(true);
-
-    try {
-      const response = await computeRoute({
-        waypoints: optimized.route.map((place) => ({
-          lat: Number(place?.lat),
-          lng: Number(place?.lng ?? place?.lon),
-        })),
-        mode: 'drive',
-        options: {},
-      });
-
-      const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-      console.log('Route metrics:', {
-        distanceKm: metrics.distanceKm,
-        durationSeconds: metrics.durationSeconds,
-        durationMinutes: metrics.durationMinutes,
-        estimatedMinutes: metrics.estimatedMinutes,
-      });
-      
-      let totalDistance = optimized.totalDistance;
-      let estimatedHours = optimized.estimatedHours;
-      
-      // Prefer API distance if available and positive
-      if (metrics.distanceKm > 0) {
-        totalDistance = Math.max(1, Math.round(metrics.distanceKm));
-      }
-      
-      // Prefer actual duration from API if available
-      if (metrics.durationSeconds > 0) {
-        estimatedHours = Math.max(1, Math.round(metrics.durationSeconds / 3600 * 10) / 10);
-      } 
-      // Otherwise use estimated time from distance
-      else if (metrics.estimatedMinutes > 0) {
-        estimatedHours = Math.max(1, Math.round(metrics.estimatedMinutes / 60 * 10) / 10);
-      }
-
-      const journeyRecord = {
-        id: Date.now(), createdAt: new Date().toISOString(),
-        origin, destination, departureDate, comingDate, budgetRange, stops,
-        route: optimized.route,
-        routeMetrics: metrics,
-        totalDistance,
-        estimatedHours,
-      };
-
-      setResult(journeyRecord);
-      setFinalizedRoute(optimized.route);
-      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
-      setEditingRouteIndex(null); setEditStopSelection(null);
-      setCurrentStep(2);
-    } catch {
-      const journeyRecord = {
-        id: Date.now(), createdAt: new Date().toISOString(),
-        origin, destination, departureDate, comingDate, budgetRange, stops,
-        route: optimized.route, totalDistance: optimized.totalDistance, estimatedHours: optimized.estimatedHours,
-      };
-
-      setResult(journeyRecord);
-      setFinalizedRoute(optimized.route);
-      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
-      setEditingRouteIndex(null); setEditStopSelection(null);
-      setCurrentStep(2);
-    } finally {
-      setRouteLoading(false);
-    }
+    const journeyRecord = {
+      id: Date.now(), createdAt: new Date().toISOString(),
+      origin, destination, departureDate, comingDate, budgetRange, stops,
+      route: optimized.route,
+      totalDistance: optimized.totalDistance,
+      estimatedHours: optimized.estimatedHours,
+      routeMetrics: {
+        totalDistance: optimized.totalDistance,
+        estimatedHours: optimized.estimatedHours,
+      },
+    };
+    setResult(journeyRecord);
+    setFinalizedRoute(optimized.route);
+    setShowPreviewAddBox(false); setShowPreviewEditBox(false);
+    setEditingRouteIndex(null); setEditStopSelection(null);
+    setCurrentStep(2);
   };
 
   // ── Checkpoint toggle ──
@@ -584,6 +496,14 @@ export default function AgentHomePage() {
       const next = [...prev];
       const di = next.findIndex((cp) => cp.name === destination.name);
       di >= 0 ? next.splice(di, 0, place) : next.push(place);
+      const metrics = summarizeOrderedRoute(next);
+      setResult((current) => (current ? {
+        ...current,
+        route: next,
+        totalDistance: metrics.totalDistance,
+        estimatedHours: metrics.estimatedHours,
+        routeMetrics: metrics,
+      } : current));
       return next;
     });
   };
@@ -902,8 +822,8 @@ export default function AgentHomePage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <button type="button" onClick={resetPlanner}
                     className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Cancel</button>
-                  <button type="button" onClick={buildJourney} disabled={routeLoading}
-                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70">{routeLoading ? 'Calculating Route...' : 'Continue'}</button>
+                  <button type="button" onClick={buildJourney}
+                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110">Continue</button>
                 </div>
               </div>
             </div>
@@ -1056,12 +976,11 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
-                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
               </div>
             </div>
 
@@ -1176,12 +1095,11 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
-                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
               </div>
             </div>
 

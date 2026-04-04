@@ -136,6 +136,35 @@ function getSegmentTransitLabel(segment) {
   return `${timeLabel} • ${distanceLabel}`;
 }
 
+function getVenueFallbackImage(item, mode) {
+  const seed = [mode, item?.name, item?.area || item?.vicinity || item?.best_for || 'venue']
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+
+  const sig = hash % 1000;
+  const hotelFallbacks = [
+    'https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1445019980597-93fa8acb246c?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1551882547-ff40c63fe5fa?auto=format&fit=crop&w=1200&q=80',
+  ];
+  const eateryFallbacks = [
+    'https://images.unsplash.com/photo-1517248135467-7a0c7e0f8f0a?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1559339352-11d035aa65de?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1200&q=80',
+  ];
+
+  const fallbackPool = mode === 'hotels' ? hotelFallbacks : eateryFallbacks;
+  const fallbackUrl = fallbackPool[hash % fallbackPool.length];
+  return `${fallbackUrl}&sig=${sig}`;
+}
+
 export default function ItineraryPlannerPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -160,6 +189,7 @@ export default function ItineraryPlannerPage() {
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
   const [routeError, setRouteError] = useState('');
   const [toast, setToast] = useState(null);
+  const [venueDrawer, setVenueDrawer] = useState({ open: false, dayIndex: 0, mode: 'hotels' });
 
   const toastTimerRef = useRef(null);
   const lastRemovedRef = useRef(null);
@@ -222,6 +252,84 @@ export default function ItineraryPlannerPage() {
     if (!itineraryBundle?.itinerary || !Array.isArray(itineraryBundle.itinerary)) return [];
     return itineraryBundle.itinerary;
   }, [itineraryBundle]);
+
+  const getHotelsForDay = (day) => {
+    const hotels = [];
+    const seen = new Set();
+
+    const pushUnique = (item) => {
+      const name = String(item?.name || item?.area || '').trim();
+      const area = String(item?.area || item?.vicinity || '').trim();
+      const key = `${normalizeName(name)}|${normalizeName(area)}`;
+      if (!name || seen.has(key)) return;
+      seen.add(key);
+      hotels.push(item);
+    };
+
+    if (day?.stay && (day.stay.name || day.stay.area)) {
+      pushUnique(day.stay);
+    }
+    (day?.stay_options || []).forEach(pushUnique);
+    return hotels;
+  };
+
+  const getEateriesForDay = (day) => (Array.isArray(day?.dining_places) ? day.dining_places : []);
+
+  const getLocalAttractionsForDay = (day) => {
+    const highlights = [];
+    const seen = new Set();
+
+    const pushUnique = (text) => {
+      const value = String(text || '').trim();
+      if (!value) return;
+      const key = normalizeName(value);
+      if (seen.has(key)) return;
+      seen.add(key);
+      highlights.push(value);
+    };
+
+    const eateries = getEateriesForDay(day).slice(0, 2);
+    eateries.forEach((spot) => {
+      const name = String(spot?.name || '').trim();
+      const bestFor = String(spot?.best_for || spot?.cuisine || '').trim();
+      const area = String(spot?.area || spot?.vicinity || day?.city || '').trim();
+      if (!name) return;
+      if (bestFor) {
+        pushUnique(`${name} near ${area} is a well-known local eatery, popular for ${bestFor}.`);
+      } else {
+        pushUnique(`${name} near ${area} is a popular local food stop worth trying.`);
+      }
+    });
+
+    const topActivity = Array.isArray(day?.activities) ? day.activities[0] : null;
+    if (topActivity?.title) {
+      const place = String(topActivity.location || day?.city || '').trim();
+      pushUnique(`Nearby sightseeing highlight: ${topActivity.title}${place ? ` around ${place}` : ''}.`);
+    }
+
+    (day?.local_explorations || []).slice(0, 2).forEach((item) => {
+      pushUnique(String(item || '').trim());
+    });
+
+    if (highlights.length < 3 && day?.city) {
+      pushUnique(`Check for local cultural performances, festivals, or evening heritage events in ${day.city} during your dates.`);
+    }
+
+    return highlights.slice(0, 4);
+  };
+
+  const drawerDay = days[venueDrawer.dayIndex] || null;
+  const drawerItems = venueDrawer.mode === 'hotels'
+    ? getHotelsForDay(drawerDay)
+    : getEateriesForDay(drawerDay);
+
+  const openVenueDrawer = (dayIndex, mode) => {
+    setVenueDrawer({ open: true, dayIndex, mode });
+  };
+
+  const closeVenueDrawer = () => {
+    setVenueDrawer((prev) => ({ ...prev, open: false }));
+  };
 
   const activeDayMapPlaces = useMemo(() => selectedPlaces, [selectedPlaces]);
 
@@ -703,7 +811,7 @@ export default function ItineraryPlannerPage() {
         <header className="mb-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">
           <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Mission Itinerary</p>
           <h1 className="mt-2 text-3xl font-semibold">{journey.origin?.name || journey.origin} to {journey.destination?.name || journey.destination}</h1>
-          <p className="mt-2 text-sm text-slate-300">Day-wise route planner with transit, activities, dining, and local exploration picks.</p>
+          <p className="mt-2 text-sm text-slate-300">Day-wise route planner with transit, activities, dining, and brief local attraction highlights.</p>
         </header>
 
         <section className="grid gap-6 lg:grid-cols-12">
@@ -808,7 +916,7 @@ export default function ItineraryPlannerPage() {
                     {day.weather_note ? <p className="mt-1 text-sm text-cyan-100/90">{day.weather_note}</p> : null}
                   </div>
 
-                  <div className="mt-5 grid gap-6 md:grid-cols-2">
+                  <div className="mt-5">
                     <section>
                       <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Activities</p>
                       <ol className="mt-3 space-y-3">
@@ -842,40 +950,12 @@ export default function ItineraryPlannerPage() {
                       </ol>
 
                       <div className="mt-5">
-                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Local Explorations</p>
+                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Local Attractions</p>
                         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-300">
-                          {(day.local_explorations || []).map((item, itemIndex) => (
+                          {getLocalAttractionsForDay(day).map((item, itemIndex) => (
                             <li key={`${day.day}-local-${itemIndex}`}>{item}</li>
                           ))}
                         </ul>
-                      </div>
-                    </section>
-
-                    <section>
-                      <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Dining Picks</p>
-                      <ul className="mt-3 space-y-3">
-                        {(day.dining_places || []).map((spot, spotIndex) => (
-                          <li key={`${day.day}-dining-${spotIndex}`} className="pl-1">
-                            <p className="text-base font-semibold text-slate-100">{spot.name || 'Recommended dining place'}</p>
-                            <p className="mt-1 text-sm text-slate-300">{spot.cuisine || 'Cuisine'} • {spot.area || day.city}</p>
-                            {spot.best_for ? <p className="mt-1 text-sm text-emerald-200/90">Best for: {spot.best_for}</p> : null}
-                          </li>
-                        ))}
-                        {(!day.dining_places || day.dining_places.length === 0) ? (
-                          <li className="text-sm text-slate-400">No dining picks generated for this day.</li>
-                        ) : null}
-                      </ul>
-
-                      <div className="mt-5">
-                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Stay</p>
-                        {day.stay?.area ? (
-                          <>
-                            <p className="mt-2 text-base font-semibold text-emerald-100">{day.stay.area} {day.stay.type ? `• ${day.stay.type}` : ''}</p>
-                            {day.stay.reason ? <p className="mt-1 text-sm text-emerald-100/90">{day.stay.reason}</p> : null}
-                          </>
-                        ) : (
-                          <p className="mt-2 text-sm text-slate-300">Stay recommendation not available.</p>
-                        )}
                       </div>
                     </section>
                   </div>
@@ -887,6 +967,29 @@ export default function ItineraryPlannerPage() {
                         <li key={`${day.day}-tip-${tipIndex}`}>{tip}</li>
                       ))}
                     </ul>
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap gap-3 border-t border-slate-800 pt-4">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openVenueDrawer(index, 'hotels');
+                      }}
+                      className="rounded-lg border border-emerald-300/35 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/20"
+                    >
+                      Hotels
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openVenueDrawer(index, 'eateries');
+                      }}
+                      className="rounded-lg border border-amber-300/35 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/20"
+                    >
+                      Eateries
+                    </button>
                   </div>
                 </article>
               ))}
@@ -909,6 +1012,66 @@ export default function ItineraryPlannerPage() {
           </Link>
         </div>
       </div>
+
+      {venueDrawer.open ? (
+        <>
+          <button
+            type="button"
+            aria-label="Close venue drawer"
+            onClick={closeVenueDrawer}
+            className="fixed inset-0 z-40 bg-slate-950/70"
+          />
+          <aside className="fixed right-0 top-0 z-50 h-full w-full max-w-md border-l border-slate-700 bg-slate-900/95 p-4 shadow-2xl backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-700 pb-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Day {drawerDay?.day || venueDrawer.dayIndex + 1}</p>
+                <h3 className="mt-1 text-lg font-semibold text-slate-100">
+                  {venueDrawer.mode === 'hotels' ? 'Hotels & Hostels' : 'Eateries'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeVenueDrawer}
+                className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-slate-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 max-h-[calc(100vh-110px)] space-y-3 overflow-y-auto pr-1">
+              {drawerItems.length === 0 ? (
+                <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-sm text-slate-300">
+                  No {venueDrawer.mode === 'hotels' ? 'hotel/hostel' : 'eatery'} suggestions available for this day.
+                </div>
+              ) : drawerItems.map((item, itemIndex) => (
+                <article key={`${item.name || 'venue'}-${itemIndex}`} className="overflow-hidden rounded-xl border border-slate-700 bg-slate-950/70">
+                  <div className="relative h-40 w-full overflow-hidden bg-slate-800">
+                    {item.imageUrl ? (
+                      <img
+                        src={item.imageUrl}
+                        alt={item.name || 'Venue'}
+                        className="h-full w-full object-cover"
+                        onError={(event) => {
+                          event.currentTarget.remove();
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                  <div className="p-3">
+                    <p className="text-base font-semibold text-slate-100">{item.name || 'Unnamed place'}</p>
+                    <p className="mt-1 text-sm text-slate-300">{item.area || item.vicinity || drawerDay?.city || 'Location unavailable'}</p>
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
+                      {item.rating ? <span className="rounded-full border border-emerald-300/35 bg-emerald-500/10 px-2 py-1">Reviews: {Number(item.rating).toFixed(1)}</span> : null}
+                    </div>
+                    {item.reason ? <p className="mt-2 text-xs text-emerald-200/90">{item.reason}</p> : null}
+                    {item.best_for ? <p className="mt-2 text-xs text-amber-100/90">Best for: {item.best_for}</p> : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </aside>
+        </>
+      ) : null}
 
       {toast ? (
         <div className="fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border border-slate-700 bg-slate-900/95 p-3 shadow-xl">

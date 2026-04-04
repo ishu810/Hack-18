@@ -27,13 +27,42 @@ const itineraryDiningSchema = new mongoose.Schema({
   name: { type: String, default: '' },
   cuisine: { type: String, default: '' },
   area: { type: String, default: '' },
-  best_for: { type: String, default: '' }
+  best_for: { type: String, default: '' },
+  imageUrl: { type: String, default: '' },
+  rating: { type: Number, default: 0 },
+  price_level: { type: Number, default: 0 },
+  googleMapsUrl: { type: String, default: '' },
+  vicinity: { type: String, default: '' },
+  placeId: { type: String, default: '' },
+  distanceKm: { type: Number, default: 0 },
+  isOpenNow: { type: Boolean, default: false }
 }, { _id: false });
 
 const itineraryStaySchema = new mongoose.Schema({
   area: { type: String, default: '' },
   type: { type: String, default: '' },
-  reason: { type: String, default: '' }
+  reason: { type: String, default: '' },
+  name: { type: String, default: '' },
+  imageUrl: { type: String, default: '' },
+  rating: { type: Number, default: 0 },
+  price_level: { type: Number, default: 0 },
+  googleMapsUrl: { type: String, default: '' },
+  vicinity: { type: String, default: '' },
+  placeId: { type: String, default: '' }
+}, { _id: false });
+
+const itineraryStayOptionSchema = new mongoose.Schema({
+  name: { type: String, default: '' },
+  area: { type: String, default: '' },
+  type: { type: String, default: '' },
+  reason: { type: String, default: '' },
+  imageUrl: { type: String, default: '' },
+  rating: { type: Number, default: 0 },
+  price_level: { type: Number, default: 0 },
+  googleMapsUrl: { type: String, default: '' },
+  vicinity: { type: String, default: '' },
+  placeId: { type: String, default: '' },
+  distanceKm: { type: Number, default: 0 }
 }, { _id: false });
 
 const itineraryDaySchema = new mongoose.Schema({
@@ -46,6 +75,7 @@ const itineraryDaySchema = new mongoose.Schema({
   travel: { type: itineraryTravelSchema, default: null },
   food: { type: [itineraryFoodSchema], default: [] },
   dining_places: { type: [itineraryDiningSchema], default: [] },
+  stay_options: { type: [itineraryStayOptionSchema], default: [] },
   local_explorations: { type: [String], default: [] },
   stay: { type: itineraryStaySchema, default: null },
   tips: { type: [String], default: [] },
