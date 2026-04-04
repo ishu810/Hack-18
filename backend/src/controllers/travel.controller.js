@@ -117,3 +117,246 @@ const orderPlacesByNearest = (places = []) => {
   return ordered;
 };
 
+const selectPlaces = asyncHandler(async (req, res) => {
+  const { tripId } = req.params;
+  const { selectedPlaces } = req.body;
+
+  console.log('\n========== SELECT PLACES DEBUG ==========');
+  console.log('📍 Trip ID:', tripId);
+  console.log('📋 Selected Places Count:', selectedPlaces?.length);
+  console.log('📋 Selected Places:', JSON.stringify(selectedPlaces.slice(0, 2), null, 2));
+
+  if (!selectedPlaces || selectedPlaces.length === 0) {
+    console.error('❌ No places selected');
+    return res.status(400).json({ success: false, message: 'No places selected' });
+  }
+
+  const normalizedSelected = selectedPlaces.map((p) => {
+    const candidateUrl = p.imageUrl || p.image_url || '';
+    return {
+      name: p.name || '',
+      type: p.type || 'unknown',
+      location: p.location || '',
+      lat: toFiniteNumber(p.lat),
+      lng: toFiniteNumber(p.lng),
+      rating: toFiniteNumber(p.rating),
+      popularity: toFiniteNumber(p.popularity),
+      best_visit_reason: p.best_visit_reason || p.bestVisitReason || '',
+      imageUrl: isProbablyValidUrl(candidateUrl) ? candidateUrl : FALLBACK_IMAGE
+    };
+  });
+
+  console.log('✅ Normalized places count:', normalizedSelected.length);
+
+  try {
+    const trip = await Travel.findByIdAndUpdate(tripId, {
+      selectedPlaces: normalizedSelected,
+      status: 'places_selected'
+    }, { new: true });
+
+    if (!trip) {
+      console.error('❌ Trip not found:', tripId);
+      return res.status(404).json({ success: false, message: 'Trip not found' });
+    }
+
+    console.log('✅ Trip updated successfully');
+    console.log('📊 New Trip Status:', trip.status);
+    console.log('📊 Selected Places in DB:', trip.selectedPlaces.length);
+    console.log('=========================================\n');
+
+    res.json({
+      success: true,
+      trip
+    });
+  } catch (error) {
+    console.error('❌ Error updating trip:', error.message);
+    console.error('Stack:', error.stack);
+    console.log('=========================================\n');
+    res.status(500).json({ success: false, message: 'Failed to select places', error: error.message });
+  }
+});
+
+// Generate itinerary
+const generateItinerary = asyncHandler(async (req, res) => {
+  const { tripId } = req.params;
+
+  console.log('\n========== GENERATE ITINERARY DEBUG ==========');
+  console.log('📍 Trip ID:', tripId);
+
+  const trip = await Travel.findById(tripId);
+
+  if (!trip) {
+    console.error('❌ Trip not found:', tripId);
+    console.log('================================================\n');
+    return res.status(404).json({ success: false, message: 'Trip not found' });
+  }
+
+  console.log('✅ Trip found');
+  console.log('📊 Trip Status:', trip.status);
+  console.log('📊 Selected Places:', trip.selectedPlaces?.length || 0);
+  console.log('📊 Trip Destination:', trip.destination);
+  console.log('📊 Trip Dates:', trip.dates?.length || 0);
+
+  if (trip.status !== 'places_selected') {
+    console.error('❌ Invalid trip status. Expected: places_selected, Got:', trip.status);
+    console.log('📝 Available trip info:', {
+      tripId: trip._id,
+      status: trip.status,
+      selectedPlacesCount: trip.selectedPlaces?.length,
+      candidatePlacesCount: trip.candidatePlaces?.length
+    });
+    console.log('================================================\n');
+    return res.status(400).json({ 
+      success: false, 
+      message: `Places not selected yet. Current status: ${trip.status}`,
+      tripStatus: trip.status,
+      selectedPlaces: trip.selectedPlaces?.length
+    });
+  }
+
+  console.log('✅ Trip status is valid (places_selected)');
+
+  const prompt = buildItineraryPrompt({
+    origin: trip.origin,
+    destination: trip.destination,
+    days: getTripDaysFromDates(trip.dates),
+    selectedPlaces: trip.selectedPlaces,
+    budget: trip.budget,
+    dates: trip.dates
+  });
+
+  console.log('✅ Prompt built, length:', prompt.length, 'characters');
+
+  let itineraryData;
+  try {
+    console.log('🔄 Calling LLM...');
+    const response = await llm.invoke(prompt);
+    const content = response.content || response.text || '{}';
+    
+    console.log('✅ LLM response received, length:', content.length);
+    console.log('📝 Response preview:', content.substring(0, 200));
+    
+    itineraryData = JSON.parse(content);
+    console.log('✅ Response parsed successfully');
+    console.log('📊 Itinerary days:', itineraryData.itinerary?.length);
+  } catch (error) {
+    console.warn('⚠️ LLM generation failed:', error.message);
+    console.log('📝 Using fallback itinerary...');
+    
+    // Generate simple fallback itinerary
+    itineraryData = {
+      itinerary: trip.selectedPlaces.slice(0, getTripDaysFromDates(trip.dates)).map((place, index) => {
+        const currentCity = place.location || trip.destination;
+        const previousCity = index === 0
+          ? trip.origin
+          : (trip.selectedPlaces[index - 1]?.location || trip.origin);
+        const isTransferDay = index > 0 && previousCity !== currentCity;
+
+        return {
+          day: index + 1,
+          city: currentCity,
+          theme: place.type || 'Sightseeing',
+          weather: 'Clear',
+          weather_note: 'Good conditions',
+          activities: [
+            {
+              title: isTransferDay ? `After reaching ${currentCity}, visit ${place.name}` : `Visit ${place.name}`,
+              time: '9:00 AM - 12:00 PM',
+              duration_min: 180,
+              description: place.best_visit_reason || 'Explore attractions',
+              type: 'outdoor',
+              location: currentCity || 'Main area'
+            }
+          ],
+          travel: isTransferDay ? {
+            from: previousCity,
+            to: currentCity,
+            duration: '3-6 hours',
+            mode: 'car',
+            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`
+          } : null,
+          food: [
+            {
+              meal: 'Lunch',
+              place: `Local restaurant in ${currentCity}`,
+              type: 'local'
+            }
+          ],
+          dining_places: [
+            {
+              name: `${currentCity} Heritage Kitchen`,
+              cuisine: 'Regional cuisine',
+              area: currentCity,
+              best_for: 'Popular local thali and signature dishes'
+            }
+          ],
+          local_explorations: [
+            `${currentCity} old market walk`,
+            `${currentCity} local artisan lane`
+          ],
+          stay: {
+            area: currentCity,
+            type: 'mid-range',
+            reason: 'Close to attractions'
+          },
+          tips: [
+            'Wear comfortable shoes',
+            'Carry water and sunscreen'
+          ],
+          summary: isTransferDay
+            ? `Traveled from ${previousCity} to ${currentCity}, then visited ${place.name}.`
+            : `Explored ${place.name} and enjoyed local cuisine in ${currentCity}.`
+        };
+      }),
+      total_estimated_cost: trip.budget,
+      packing_tips: [
+        'Light, breathable clothing',
+        'Comfortable walking shoes',
+        'Sun protection',
+        'Power bank'
+      ],
+      best_time_to_visit: 'Check weather forecast before the trip'
+    };
+  }
+
+  try {
+    itineraryData = await enrichItineraryWithGoogleVenues(itineraryData, trip);
+    console.log('✅ Google venue enrichment completed');
+  } catch (enrichmentError) {
+    console.warn('⚠️ Google venue enrichment skipped:', enrichmentError.message || enrichmentError);
+  }
+
+  try {
+    const normalizedItinerary = normalizeItineraryForSave(itineraryData);
+    console.log('✅ Normalized itinerary days:', normalizedItinerary.itinerary.length);
+
+    trip.itinerary = normalizedItinerary;
+    trip.status = 'itinerary_generated';
+    const savedTrip = await trip.save();
+    
+    console.log('✅ Trip saved successfully');
+    console.log('📊 Final trip status:', savedTrip.status);
+    console.log('================================================\n');
+
+    res.json({
+      success: true,
+      itinerary: savedTrip.itinerary
+    });
+  } catch (error) {
+    console.error('❌ Error saving trip:', error.message);
+    console.error('Stack:', error.stack);
+    console.log('================================================\n');
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to save itinerary', 
+      error: error.message 
+    });
+      }
+});
+export{
+  
+  selectPlaces,
+  generateItinerary
+  
+
+}
