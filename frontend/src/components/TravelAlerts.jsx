@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Plane, Hotel, Navigation, ChevronDown, ChevronUp, X, ExternalLink, AlertCircle, CloudSun } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import { 
@@ -65,8 +67,8 @@ const TravelAlerts = () => {
   return (
     <div className="min-h-screen bg-[#0b0f1a] text-slate-300 p-6 font-sans flex flex-col gap-6 relative overflow-hidden">
       
-      {/* SIDE PANEL (z-index updated to overlay map) */}
-      <div className={`fixed top-0 right-0 h-full w-full md:w-96 bg-[#111827] border-l border-slate-800 z-[2000] transform transition-transform duration-500 ease-in-out shadow-2xl ${selectedCity ? 'translate-x-0' : 'translate-x-full'}`}>
+      {/* SIDE PANEL */}
+      <div className={`fixed top-0 right-0 h-full w-full md:w-96 bg-[#111827] border-l border-slate-800 z-2000 transform transition-transform duration-500 ease-in-out shadow-2xl ${selectedCity ? 'translate-x-0' : 'translate-x-full'}`}>
         {selectedCity && (
           <div className="p-6 flex flex-col h-full">
             <button onClick={() => setSelectedCity(null)} className="self-end p-2 hover:bg-slate-800 rounded-full mb-4">
@@ -98,18 +100,18 @@ const TravelAlerts = () => {
       <div className="flex justify-between items-center">
         <h1 className="text-xl font-bold tracking-widest text-white uppercase">Travel Ops Dashboard</h1>
         <div className="flex gap-4">
-          <div className="bg-[#111827] border border-slate-800 p-3 px-6 rounded-lg min-w-[160px]">
+          <div className="bg-[#111827] border border-slate-800 p-3 px-6 rounded-lg min-w-40">
              <span className="text-[10px] text-slate-500 uppercase font-bold">Total Distance</span>
              <p className="text-2xl font-bold text-white">12,540 <span className="text-xs text-slate-500">KM</span></p>
           </div>
-          <div className="bg-[#111827] border border-slate-800 p-3 px-6 rounded-lg min-w-[160px]">
-             <span className="text-[10px] text-slate-500 uppercase font-bold">Transit Time</span>
-             <p className="text-2xl font-bold text-white">15h 40m</p>
+          <div className="bg-[#111827] border border-slate-800 p-3 px-6 rounded-lg min-w-40">
+             <span className="text-[10px] text-slate-500 uppercase font-bold">Status</span>
+             <p className="text-xl font-bold text-emerald-400 flex items-center gap-2">● ACTIVE</p>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-6 flex-grow overflow-hidden">
+      <div className="grid grid-cols-12 gap-6 grow overflow-hidden">
         
         {/* LEFT: REALISTIC BLUE MAP (Col-span changed back to 3 to keep original layout) */}
         <div className="col-span-12 lg:col-span-3 bg-[#111827] rounded-xl border border-slate-800 overflow-hidden relative group z-10 blue-map-container">
@@ -197,17 +199,15 @@ const TravelAlerts = () => {
                             </span>
                           </div>
                         </div>
-
-                        <div className="flex flex-col gap-2 justify-center">
-                          <button className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-blue-600 py-2 rounded-md text-[10px] font-bold uppercase transition-all">
-                            <CloudSun size={14} /> Forecast
-                          </button>
-                          <button className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-blue-600 py-2 rounded-md text-[10px] font-bold uppercase transition-all">
-                            <Plane size={14} /> Book Flight
-                          </button>
-                          <button className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-blue-600 py-2 rounded-md text-[10px] font-bold uppercase transition-all">
-                            <Hotel size={14} /> Book Hotel
-                          </button>
+                        <div className="flex flex-col gap-2">
+                          <Link
+                            to="/weather-dashboard"
+                            className="bg-cyan-600 hover:bg-cyan-500 py-2 rounded text-[10px] font-bold uppercase transition-all text-center"
+                          >
+                            <CloudSun size={14} className="inline mr-2" /> Forecast
+                          </Link>
+                          <button className="bg-slate-800 hover:bg-blue-600 py-2 rounded text-[10px] font-bold uppercase transition-all"><Plane size={14} className="inline mr-2"/> Flight</button>
+                          <button className="bg-slate-800 hover:bg-blue-600 py-2 rounded text-[10px] font-bold uppercase transition-all"><Hotel size={14} className="inline mr-2"/> Hotel</button>
                         </div>
                       </div>
                     </div>
@@ -229,12 +229,12 @@ const TravelAlerts = () => {
             </p>
           </div>
 
-          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 flex-grow">
+          <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 grow">
             <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-6">Mission Timeline</h2>
             <div className="relative border-l border-slate-800 ml-2 space-y-8">
               {itinerary.map((item, i) => (
                 <div key={i} className="relative pl-6">
-                  <div className={`absolute -left-[5px] w-2 h-2 rounded-full ${item.status === 'current' ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]' : 'bg-blue-500'}`}></div>
+                  <div className={`absolute -left-1.25 w-2 h-2 rounded-full ${item.status === 'current' ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]' : 'bg-blue-500'}`}></div>
                   <p className="text-[10px] text-slate-500 leading-none">{item.date}</p>
                   <p className="text-sm font-bold text-white">{item.location}</p>
                 </div>

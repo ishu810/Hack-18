@@ -1,12 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
 
 const MotionSection = motion.section;
-const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
+const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY ;
 
 const HISTORY_KEY = 'agentJourneyHistory';
 const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', 'Stay Preferences', 'Final Route'];
+const DUMMY_NIGHTS_PATTERN = [2, 1, 3, 2, 1, 2];
 
 function getPlaceLabel(place) {
   if (!place) return '';
@@ -116,10 +127,23 @@ export default function AgentHomePage() {
   });
   const [history, setHistory] = useState([]);
   const [error, setError] = useState('');
+  const [dragStopIndex, setDragStopIndex] = useState(null);
+  const [dragRouteIndex, setDragRouteIndex] = useState(null);
+  const [previewStop, setPreviewStop] = useState(null);
+  const [previewStopInput, setPreviewStopInput] = useState('');
+  const [previewNights, setPreviewNights] = useState(1);
+  const [showPreviewAddBox, setShowPreviewAddBox] = useState(false);
+  const [showPreviewEditBox, setShowPreviewEditBox] = useState(false);
+  const [editingRouteIndex, setEditingRouteIndex] = useState(null);
+  const [editStopInput, setEditStopInput] = useState('');
+  const [editNights, setEditNights] = useState(1);
+  const [editStopSelection, setEditStopSelection] = useState(null);
 
   const originSuggestions = useDebouncedSearch(originInput);
   const destinationSuggestions = useDebouncedSearch(destinationInput);
   const stopSuggestions = useDebouncedSearch(newStopInput);
+  const previewStopSuggestions = useDebouncedSearch(previewStopInput);
+  const editStopSuggestions = useDebouncedSearch(editStopInput);
 
   useEffect(() => {
     const saved = localStorage.getItem(HISTORY_KEY);
@@ -173,6 +197,141 @@ export default function AgentHomePage() {
     setStops((prev) => prev.filter((stop) => stop.name !== stopToRemove.name));
   };
 
+  const reorderStops = (fromIndex, toIndex) => {
+    if (fromIndex === toIndex || fromIndex == null || toIndex == null) return;
+
+    setStops((previous) => {
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= previous.length || toIndex >= previous.length) {
+        return previous;
+      }
+
+      const nextStops = [...previous];
+      const [movedStop] = nextStops.splice(fromIndex, 1);
+      nextStops.splice(toIndex, 0, movedStop);
+      return nextStops;
+    });
+  };
+
+  const reorderRoute = (fromIndex, toIndex) => {
+    if (!result || fromIndex === toIndex || fromIndex == null || toIndex == null) return;
+
+    const routeSource = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= routeSource.length ||
+      toIndex >= routeSource.length
+    ) {
+      return;
+    }
+
+    const moving = routeSource[fromIndex];
+    const target = routeSource[toIndex];
+    const movingIsCore = getPlaceLabel(moving) === getPlaceLabel(origin);
+    const targetIsCore = getPlaceLabel(target) === getPlaceLabel(origin);
+    if (movingIsCore || targetIsCore) return;
+
+    const nextRoute = [...routeSource];
+    const [moved] = nextRoute.splice(fromIndex, 1);
+    nextRoute.splice(toIndex, 0, moved);
+    setFinalizedRoute(nextRoute);
+  };
+
+  const editRoutePoint = (index) => {
+    if (!result) return;
+
+    const routeSource = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
+    const point = routeSource[index];
+    if (!point) return;
+
+    const isCore = getPlaceLabel(point) === getPlaceLabel(origin);
+    if (isCore) return;
+
+    setEditingRouteIndex(index);
+    setEditStopInput(point.name || '');
+    setEditNights(Math.max(1, Number(point.nights || 1)));
+    setEditStopSelection(null);
+    setShowPreviewAddBox(false);
+    setShowPreviewEditBox(true);
+  };
+
+  const deleteRoutePoint = (index) => {
+    if (!result) return;
+
+    const routeSource = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
+    const point = routeSource[index];
+    if (!point) return;
+
+    const isCore = getPlaceLabel(point) === getPlaceLabel(origin);
+    if (isCore) return;
+
+    const updatedRoute = routeSource.filter((_, routeIndex) => routeIndex !== index);
+    setFinalizedRoute(updatedRoute);
+  };
+
+  const addPreviewDestination = () => {
+    if (!result) return;
+
+    const typedName = (previewStopInput || '').trim();
+    if (!previewStop && !typedName) {
+      setError('Enter destination name before adding.');
+      return;
+    }
+
+    const routeSource = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
+    const basePoint = routeSource[routeSource.length - 1] || destination || origin;
+    const fallbackLat = typeof basePoint?.lat === 'number' ? basePoint.lat : 20;
+    const fallbackLng = typeof basePoint?.lng === 'number' ? basePoint.lng : 0;
+    const newPoint = {
+      ...(previewStop || {}),
+      name: previewStop?.name || typedName,
+      lat: typeof previewStop?.lat === 'number' ? previewStop.lat : fallbackLat + 0.12,
+      lng: typeof previewStop?.lng === 'number' ? previewStop.lng : fallbackLng + 0.12,
+      nights: Math.max(1, Number(previewNights || 1)),
+    };
+
+    setError('');
+    setFinalizedRoute([...routeSource, newPoint]);
+    setPreviewStop(null);
+    setPreviewStopInput('');
+    setPreviewNights(1);
+    setShowPreviewAddBox(false);
+    setDragRouteIndex(null);
+  };
+
+  const applyPreviewEdit = () => {
+    if (!result || editingRouteIndex == null) return;
+
+    const nextName = (editStopInput || '').trim();
+    if (!nextName) {
+      setError('Enter destination name before saving edits.');
+      return;
+    }
+
+    const routeSource = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
+    if (editingRouteIndex < 0 || editingRouteIndex >= routeSource.length) return;
+
+    const updatedRoute = routeSource.map((item, routeIndex) =>
+      routeIndex === editingRouteIndex
+        ? {
+            ...item,
+            name: nextName,
+            lat: typeof editStopSelection?.lat === 'number' ? editStopSelection.lat : item.lat,
+            lng: typeof editStopSelection?.lng === 'number' ? editStopSelection.lng : item.lng,
+            nights: Math.max(1, Number(editNights || 1)),
+          }
+        : item,
+    );
+
+    setError('');
+    setFinalizedRoute(updatedRoute);
+    setShowPreviewEditBox(false);
+    setEditingRouteIndex(null);
+    setEditStopInput('');
+    setEditNights(1);
+    setEditStopSelection(null);
+  };
+
   const buildJourney = () => {
     setError('');
 
@@ -213,26 +372,22 @@ export default function AgentHomePage() {
 
     setResult(journeyRecord);
     setFinalizedRoute(optimized.route);
+    setShowPreviewAddBox(false);
+    setShowPreviewEditBox(false);
+    setEditingRouteIndex(null);
+    setEditStopSelection(null);
     setCurrentStep(2);
   };
 
   const toggleCheckpoint = (place) => {
-    if (!result || place.name === origin?.name || place.name === destination?.name) return;
+    if (!result || place.name === origin?.name) return;
 
     setFinalizedRoute((previous) => {
       if (previous.some((checkpoint) => checkpoint.name === place.name)) {
         return previous.filter((checkpoint) => checkpoint.name !== place.name);
       }
 
-      const nextRoute = [...previous];
-      const destinationIndex = nextRoute.findIndex((checkpoint) => checkpoint.name === destination.name);
-      if (destinationIndex >= 0) {
-        nextRoute.splice(destinationIndex, 0, place);
-      } else {
-        nextRoute.push(place);
-      }
-
-      return nextRoute;
+      return [...previous, place];
     });
   };
 
@@ -248,11 +403,32 @@ export default function AgentHomePage() {
     const approvedHistory = [approvedJourney, ...history].slice(0, 12);
     setHistory(approvedHistory);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(approvedHistory));
-    navigate('/mission-summary', { state: { journey: approvedJourney } });
+    navigate('/travel-alerts', { state: { journey: approvedJourney } });
   };
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
+  const previewSelectedNames = new Set(activeRoute.map((place) => getPlaceLabel(place)));
+  const availablePreviewStopOptions = previewStopSuggestions.filter(
+    (place) => !previewSelectedNames.has(place.name),
+  );
+  const occupiedEditNames = new Set(
+    activeRoute
+      .filter((_, index) => index !== editingRouteIndex)
+      .map((place) => getPlaceLabel(place)),
+  );
+  const availableEditStopOptions = editStopSuggestions.filter((place) => !occupiedEditNames.has(place.name));
+  const routeMapPoints = activeRoute.filter((place) => typeof place?.lat === 'number' && typeof place?.lng === 'number');
+  const routeMapPath = routeMapPoints.map((place) => [place.lat, place.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
+  const getNightLabel = (place, index) => {
+    const nights = Number(place?.nights);
+    if (Number.isFinite(nights) && nights > 0) {
+      return `${nights} night${nights > 1 ? 's' : ''}`;
+    }
+
+    const fallback = DUMMY_NIGHTS_PATTERN[index % DUMMY_NIGHTS_PATTERN.length];
+    return `${fallback} night${fallback > 1 ? 's' : ''}`;
+  };
 
   const resetPlanner = () => {
     setResult(null);
@@ -265,6 +441,17 @@ export default function AgentHomePage() {
     setNewStop(null);
     setNewStopInput('');
     setStops([]);
+    setDragStopIndex(null);
+    setDragRouteIndex(null);
+    setPreviewStop(null);
+    setPreviewStopInput('');
+    setPreviewNights(1);
+    setShowPreviewAddBox(false);
+    setShowPreviewEditBox(false);
+    setEditingRouteIndex(null);
+    setEditStopInput('');
+    setEditNights(1);
+    setEditStopSelection(null);
     setStayPreferences({
       hotel3: true,
       hotel4: true,
@@ -277,11 +464,11 @@ export default function AgentHomePage() {
 
   return (
     <main className="relative isolate min-h-screen overflow-hidden bg-[radial-gradient(1200px_600px_at_85%_-15%,rgba(245,158,11,0.12),transparent_60%),radial-gradient(1000px_560px_at_0%_100%,rgba(37,99,235,0.18),transparent_56%),linear-gradient(155deg,#020617_0%,#0b1324_45%,#020617_100%)] text-slate-100">
-      <div className="pointer-events-none absolute inset-0 bg-[url('/detective.bg.png')] bg-cover bg-center opacity-[0.08]" aria-hidden="true" />
+      <div className="pointer-events-none absolute inset-0 bg-[url('/detective.bg.png')] bg-cover bg-center opacity-[0.5]" aria-hidden="true" />
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.4),rgba(2,6,23,0.75))]" aria-hidden="true" />
 
       <header className="relative z-10 w-full border-b border-amber-300/20 bg-slate-950/70 backdrop-blur-sm">
-        <div className="mx-auto flex w-full max-w-7xl items-start justify-between gap-4 px-4 py-5 md:px-8 md:py-5">
+        <div className="mx-auto flex w-full max-w-8xl items-start justify-between gap-4  px-4 py-5 md:px-8"> 
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-amber-300/85">Field Command</p>
             <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-100 md:text-3xl">Operation Round Table</h1>
@@ -297,7 +484,7 @@ export default function AgentHomePage() {
       </header>
 
       <div className="relative z-10 mx-auto w-full max-w-7xl px-4 py-8 md:px-8">
-        <section className="mb-8 rounded-2xl border border-slate-700/70 bg-slate-900/55 p-4 shadow-[0_18px_44px_rgba(2,6,23,0.28)] backdrop-blur-sm md:p-5">
+        <section className="mb-8 rounded-2xl border border-slate-600/70 bg-slate-900/36 p-4 shadow-[0_18px_44px_rgba(2,6,23,0.36),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md md:p-5">
           <div className="mb-3 flex items-center justify-between gap-3">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Route Planner</p>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-200">Step {currentStep} of {STEP_ITEMS.length}</p>
@@ -341,11 +528,12 @@ export default function AgentHomePage() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-5 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-6"
+            className="mx-auto w-full max-w-6xl rounded-2xl border border-slate-600/70 bg-slate-900/48 p-5 shadow-[0_24px_52px_rgba(2,6,23,0.55),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl md:p-6"
           >
             <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Select Your Travel Destinations and Dates</h2>
 
-            <div className="mt-8 space-y-6">
+            <div className="mt-8 grid gap-6 lg:grid-cols-2">
+              <div className="space-y-6">
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-slate-300">Start Location</span>
                 <div className="relative">
@@ -436,6 +624,10 @@ export default function AgentHomePage() {
                 </label>
               </div>
 
+              </div>
+
+              <div className="space-y-6">
+
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <p className="text-sm font-medium text-slate-300">Budget Range</p>
@@ -508,19 +700,39 @@ export default function AgentHomePage() {
                     + Add Destination
                   </button>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
+                <div className="mt-3 space-y-2">
                   {stops.length === 0 ? (
                     <p className="text-sm text-slate-500">No checkpoints added.</p>
                   ) : (
-                    stops.map((stop) => (
-                      <button
+                    stops.map((stop, index) => (
+                      <div
                         key={stop.name}
-                        type="button"
-                        onClick={() => removeStop(stop)}
-                        className="rounded-full border border-slate-600 bg-slate-900/70 px-3 py-1 text-xs text-slate-200 transition hover:border-amber-300/70 hover:text-amber-200"
+                        draggable
+                        onDragStart={() => setDragStopIndex(index)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={() => {
+                          reorderStops(dragStopIndex, index);
+                          setDragStopIndex(null);
+                        }}
+                        onDragEnd={() => setDragStopIndex(null)}
+                        className={`flex items-center justify-between rounded-xl border bg-slate-900/70 px-3 py-2 text-sm text-slate-200 transition ${
+                          dragStopIndex === index
+                            ? 'border-amber-300/80 bg-amber-300/10'
+                            : 'border-slate-700 hover:border-amber-300/60'
+                        }`}
                       >
-                        {stop.name} x
-                      </button>
+                        <div className="flex items-center gap-2">
+                          <span className="cursor-grab text-xs text-slate-400">::</span>
+                          <span>{stop.name}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeStop(stop)}
+                          className="rounded-md border border-slate-600 px-2 py-1 text-[0.68rem] uppercase tracking-[0.12em] text-slate-300 transition hover:border-red-300/70 hover:text-red-200"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
@@ -544,6 +756,7 @@ export default function AgentHomePage() {
                   Continue
                 </button>
               </div>
+              </div>
             </div>
           </MotionSection>
         ) : currentStep === 2 ? (
@@ -551,45 +764,246 @@ export default function AgentHomePage() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8"
+            className="rounded-2xl border border-slate-600/70 bg-slate-900/48 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.55),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl md:p-8"
           >
-            <div className="mb-5 flex items-center justify-between gap-3">
+            <div className="relative mb-5 flex items-center justify-between gap-3">
               <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Route Preview</h2>
               <button
                 type="button"
-                onClick={resetPlanner}
-                className="text-lg font-medium text-amber-300 underline-offset-2 hover:underline"
+                onClick={() => {
+                  setShowPreviewAddBox((prev) => !prev);
+                  setShowPreviewEditBox(false);
+                }}
+                className="rounded-lg border border-amber-300/50 bg-amber-400/10 px-3 py-2 text-sm font-semibold text-amber-200 transition hover:border-amber-200 hover:bg-amber-400/20"
               >
                 + Add Destination
               </button>
+
+              {showPreviewAddBox && (
+                <div className="absolute right-0 top-12 z-30 w-full max-w-md rounded-xl border border-slate-600/80 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-100">Add Destination</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPreviewAddBox(false);
+                        setPreviewStop(null);
+                        setPreviewStopInput('');
+                        setPreviewNights(1);
+                      }}
+                      className="rounded-md border border-slate-500 px-2 py-1 text-xs text-slate-300 transition hover:border-slate-300"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="relative">
+                    <input
+                      value={previewStopInput}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setPreviewStopInput(value);
+                        setPreviewStop(null);
+                      }}
+                      placeholder="Search Destination"
+                      className="w-full rounded-lg border border-slate-600 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-300/70 focus:ring-2 focus:ring-blue-300/30"
+                    />
+                    {previewStopInput &&
+                      availablePreviewStopOptions.length > 0 &&
+                      !availablePreviewStopOptions.some((place) => place.name === previewStopInput) && (
+                        <div className="absolute z-40 mt-2 max-h-44 w-full overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
+                          {availablePreviewStopOptions.map((place) => (
+                            <button
+                              key={place.name}
+                              type="button"
+                              onMouseDown={() => {
+                                setPreviewStop(place);
+                                setPreviewStopInput(place.name);
+                              }}
+                              className="block w-full border-b border-slate-800 px-3 py-2 text-left transition hover:bg-slate-800/80"
+                            >
+                              <p className="text-sm text-slate-100">{place.name}</p>
+                              <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-600 bg-slate-950/70 px-3 py-2">
+                    <p className="text-sm text-slate-200">Number of nights</p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPreviewNights((prev) => Math.max(1, prev - 1))}
+                        className="h-7 w-7 rounded-full border border-slate-500 text-sm font-bold text-slate-200 transition hover:border-slate-300"
+                      >
+                        -
+                      </button>
+                      <span className="min-w-5 text-center text-sm font-semibold text-slate-100">{previewNights}</span>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewNights((prev) => Math.min(30, prev + 1))}
+                        className="h-7 w-7 rounded-full border border-slate-500 text-sm font-bold text-slate-200 transition hover:border-slate-300"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={addPreviewDestination}
+                    className="mt-3 w-full rounded-lg border border-amber-300/50 bg-amber-400/10 px-3 py-2 text-sm font-semibold text-amber-200 transition hover:border-amber-200 hover:bg-amber-400/20"
+                  >
+                    Add Destination
+                  </button>
+                </div>
+              )}
+
+              {showPreviewEditBox && (
+                <div className="absolute right-0 top-12 z-30 w-full max-w-md rounded-xl border border-slate-600/80 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-100">Edit Destination</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPreviewEditBox(false);
+                        setEditingRouteIndex(null);
+                        setEditStopInput('');
+                        setEditNights(1);
+                        setEditStopSelection(null);
+                      }}
+                      className="rounded-md border border-slate-500 px-2 py-1 text-xs text-slate-300 transition hover:border-slate-300"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="relative">
+                    <input
+                      value={editStopInput}
+                      onChange={(event) => {
+                        setEditStopInput(event.target.value);
+                        setEditStopSelection(null);
+                      }}
+                      placeholder="Search Destination"
+                      className="w-full rounded-lg border border-slate-600 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-300/70 focus:ring-2 focus:ring-blue-300/30"
+                    />
+                    {editStopInput &&
+                      availableEditStopOptions.length > 0 &&
+                      !availableEditStopOptions.some((place) => place.name === editStopInput) && (
+                        <div className="absolute z-40 mt-2 max-h-44 w-full overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
+                          {availableEditStopOptions.map((place) => (
+                            <button
+                              key={place.name}
+                              type="button"
+                              onMouseDown={() => {
+                                setEditStopSelection(place);
+                                setEditStopInput(place.name);
+                              }}
+                              className="block w-full border-b border-slate-800 px-3 py-2 text-left transition hover:bg-slate-800/80"
+                            >
+                              <p className="text-sm text-slate-100">{place.name}</p>
+                              <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-600 bg-slate-950/70 px-3 py-2">
+                    <p className="text-sm text-slate-200">Number of nights</p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditNights((prev) => Math.max(1, prev - 1))}
+                        className="h-7 w-7 rounded-full border border-slate-500 text-sm font-bold text-slate-200 transition hover:border-slate-300"
+                      >
+                        -
+                      </button>
+                      <span className="min-w-5 text-center text-sm font-semibold text-slate-100">{editNights}</span>
+                      <button
+                        type="button"
+                        onClick={() => setEditNights((prev) => Math.min(30, prev + 1))}
+                        className="h-7 w-7 rounded-full border border-slate-500 text-sm font-bold text-slate-200 transition hover:border-slate-300"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={applyPreviewEdit}
+                    className="mt-3 w-full rounded-lg border border-blue-300/50 bg-blue-400/10 px-3 py-2 text-sm font-semibold text-blue-200 transition hover:border-blue-200 hover:bg-blue-400/20"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="grid gap-5 lg:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
                   {activeRoute.map((place, index) => {
-                    const isCore = getPlaceLabel(place) === getPlaceLabel(origin) || getPlaceLabel(place) === getPlaceLabel(destination);
+                    const isCore = getPlaceLabel(place) === getPlaceLabel(origin);
                     const isSelected = finalizedRoute.some((checkpoint) => checkpoint.name === place.name);
 
                     return (
-                      <button
+                      <div
                         key={`${place.name}-${index}`}
-                        type="button"
-                        onClick={() => toggleCheckpoint(place)}
-                        disabled={isCore}
-                        className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition ${
+                        draggable={!isCore}
+                        onDragStart={() => {
+                          if (!isCore) setDragRouteIndex(index);
+                        }}
+                        onDragOver={(event) => {
+                          if (!isCore) event.preventDefault();
+                        }}
+                        onDrop={() => {
+                          reorderRoute(dragRouteIndex, index);
+                          setDragRouteIndex(null);
+                        }}
+                        onDragEnd={() => setDragRouteIndex(null)}
+                        className={`w-full rounded-xl border px-4 py-3 text-left transition ${
                           isSelected
                             ? 'border-amber-300/50 bg-amber-300/10'
                             : 'border-slate-700 bg-slate-950/45 opacity-60 hover:border-amber-300/40 hover:opacity-100'
-                        } ${isCore ? 'cursor-default' : 'cursor-pointer'}`}
+                        } ${isCore ? 'cursor-default' : 'cursor-move'}`}
                       >
-                        <div className="flex items-center gap-3">
-                          <span className={`h-3 w-3 rounded-full ${isSelected ? 'bg-amber-300' : 'bg-slate-600'}`} />
-                          <span className={`text-lg font-medium ${isSelected ? 'text-slate-100' : 'text-slate-400'}`}>{getPlaceLabel(place)}</span>
-                          {isCore && <span className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-500">Required</span>}
+                        <div className="flex items-start justify-between gap-3">
+                          <div
+                            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          >
+                            <span className={`h-3 w-3 rounded-full ${isSelected ? 'bg-amber-300' : 'bg-slate-600'}`} />
+                            <div className="min-w-0">
+                              <p className={`truncate text-lg font-medium ${isSelected ? 'text-slate-100' : 'text-slate-400'}`}>{getPlaceLabel(place)}</p>
+                              <p className="text-[0.68rem] uppercase tracking-[0.16em] text-slate-500">Stay: {getNightLabel(place, index)}</p>
+                            </div>
+                            {isCore && <span className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-500">Required</span>}
+                          </div>
+
+                          {!isCore && (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => editRoutePoint(index)}
+                                className="rounded-md border border-blue-400/40 px-2 py-1 text-[0.62rem] uppercase tracking-[0.12em] text-blue-200 transition hover:border-blue-300 hover:bg-blue-500/20"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => deleteRoutePoint(index)}
+                                className="rounded-md border border-red-400/40 px-2 py-1 text-[0.62rem] uppercase tracking-[0.12em] text-red-200 transition hover:border-red-300 hover:bg-red-500/20"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          )}
                         </div>
-                        <span className={`text-xs uppercase tracking-[0.14em] ${isSelected ? 'text-amber-300' : 'text-slate-500'}`}>{isSelected ? 'On' : 'Off'}</span>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -597,14 +1011,31 @@ export default function AgentHomePage() {
 
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="relative h-full min-h-80 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70">
-                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(59,130,246,0.2),transparent_40%),radial-gradient(circle_at_85%_12%,rgba(245,158,11,0.18),transparent_40%)]" />
-                  <div className="relative flex h-full items-center justify-center">
-                    <svg viewBox="0 0 340 180" className="h-44 w-[90%] text-blue-500" fill="none" aria-hidden="true">
-                      <path d="M24 152 C84 40, 136 158, 196 76 S286 124, 320 28" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeDasharray="6 6" />
-                      <circle cx="24" cy="152" r="8" fill="#111827" />
-                      <circle cx="196" cy="76" r="8" fill="#eab308" />
-                      <circle cx="320" cy="28" r="8" fill="#ef4444" />
-                    </svg>
+                  <MapContainer
+                    center={routeMapPoints[0] ? [routeMapPoints[0].lat, routeMapPoints[0].lng] : [20, 0]}
+                    zoom={3}
+                    scrollWheelZoom={true}
+                    className="h-full w-full z-10 custom-sea-blue-filter"
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
+                      url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                    />
+                    {routeMapPath.length > 1 && (
+                      <Polyline
+                        positions={routeMapPath}
+                        pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }}
+                      />
+                    )}
+                    {routeMapPoints.map((place) => (
+                      <Marker
+                        key={place.name}
+                        position={[place.lat, place.lng]}
+                      />
+                    ))}
+                  </MapContainer>
+                  <div className="absolute bottom-4 left-4 z-20 rounded border border-white/10 bg-black/60 p-2 px-4 text-[9px] font-mono text-cyan-400 backdrop-blur-md">
+                    Route_Map_View
                   </div>
                 </div>
               </div>
@@ -643,7 +1074,7 @@ export default function AgentHomePage() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8"
+            className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-600/70 bg-slate-900/48 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.55),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl md:p-8"
           >
             <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Stay Preferences</h2>
             <p className="mt-2 text-sm text-slate-400">Select hotel comfort and room allocation before finalizing the route.</p>
@@ -737,7 +1168,7 @@ export default function AgentHomePage() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8"
+            className="rounded-2xl border border-slate-600/70 bg-slate-900/48 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.55),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl md:p-8"
           >
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Final Route</h2>
@@ -755,7 +1186,7 @@ export default function AgentHomePage() {
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Final Checkpoints</p>
                 <div className="mt-3 max-h-80 space-y-3 overflow-y-auto pr-1">
                   {activeRoute.map((place, index) => {
-                    const isCore = getPlaceLabel(place) === getPlaceLabel(origin) || getPlaceLabel(place) === getPlaceLabel(destination);
+                    const isCore = getPlaceLabel(place) === getPlaceLabel(origin);
 
                     return (
                       <div key={`${place.name}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-950/45 px-4 py-3">
@@ -773,13 +1204,31 @@ export default function AgentHomePage() {
 
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="relative h-full min-h-80 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70">
-                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_12%_20%,rgba(59,130,246,0.2),transparent_40%),radial-gradient(circle_at_85%_12%,rgba(245,158,11,0.18),transparent_40%)]" />
-                  <div className="relative flex h-full items-center justify-center p-6 text-center">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Mission Ready</p>
-                      <p className="mt-2 text-2xl font-semibold text-slate-100">{getPlaceLabel(origin)} → {getPlaceLabel(destination)}</p>
-                      <p className="mt-2 text-sm text-slate-400">All route, budget, and stay selections are locked for review.</p>
-                    </div>
+                  <MapContainer
+                    center={routeMapPoints[0] ? [routeMapPoints[0].lat, routeMapPoints[0].lng] : [20, 0]}
+                    zoom={3}
+                    scrollWheelZoom={true}
+                    className="h-full w-full z-10 custom-sea-blue-filter"
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
+                      url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+                    />
+                    {routeMapPath.length > 1 && (
+                      <Polyline
+                        positions={routeMapPath}
+                        pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }}
+                      />
+                    )}
+                    {routeMapPoints.map((place) => (
+                      <Marker
+                        key={place.name}
+                        position={[place.lat, place.lng]}
+                      />
+                    ))}
+                  </MapContainer>
+                  <div className="absolute bottom-4 left-4 z-20 rounded border border-white/10 bg-black/60 p-2 px-4 text-[9px] font-mono text-cyan-400 backdrop-blur-md">
+                    Route_Map_View
                   </div>
                 </div>
               </div>
@@ -796,6 +1245,58 @@ export default function AgentHomePage() {
               </div>
             </div>
 
+            <section className="mt-5 space-y-5 rounded-2xl border border-slate-700/80 bg-slate-950/55 p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Vector</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">
+                    {getPlaceLabel(origin)} to {getPlaceLabel(destination)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Travel Window</p>
+                  <p className="mt-1 text-sm text-slate-200">{result.departureDate || 'N/A'} to {result.comingDate || 'N/A'}</p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Budget Range</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">
+                    ${Number(result.budgetRange?.[0] || 0).toLocaleString()} - ${Number(result.budgetRange?.[1] || 0).toLocaleString()}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                  <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Distance / Time</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{result.totalDistance} km / {result.estimatedHours} hrs</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4">
+                <p className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-400">Final Route</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {activeRoute.map((place, index) => {
+                    const label = getPlaceLabel(place);
+                    const isStart = index === 0;
+                    const isEnd = index === activeRoute.length - 1;
+
+                    return (
+                      <div
+                        key={`${label}-${index}`}
+                        className="rounded-lg border border-slate-700 bg-slate-950/65 p-3 shadow-[0_10px_24px_rgba(2,6,23,0.24)]"
+                      >
+                        <p className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-400">Stop {index + 1}</p>
+                        <p className="mt-1 text-sm font-semibold text-amber-100">{label || 'Unknown checkpoint'}</p>
+                        <p className="mt-2 text-xs text-slate-300">
+                          {isStart ? 'Origin point' : isEnd ? 'Destination point' : 'Intermediate checkpoint'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
               <button
                 type="button"
@@ -809,7 +1310,7 @@ export default function AgentHomePage() {
                 onClick={approveJourney}
                 className="rounded-xl border border-blue-300/35 bg-linear-to-r from-blue-600/90 to-blue-800/90 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110"
               >
-                View Your Plans
+                Proceed to Travel Alerts
               </button>
             </div>
 
@@ -832,6 +1333,16 @@ export default function AgentHomePage() {
           <p className="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-center shadow-sm">Secure Payments</p>
         </footer>
       </div>
+
+        <style jsx>{`
+          .custom-sea-blue-filter {
+            filter: hue-rotate(170deg) saturate(1.8) brightness(0.9) contrast(1.1) !important;
+          }
+
+          .leaflet-container {
+            background: #070a0d !important;
+          }
+        `}</style>
     </main>
   );
 }

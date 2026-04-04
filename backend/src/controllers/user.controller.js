@@ -26,30 +26,19 @@ const generateAccessAndRefreshTokens = async (userId) => {
 
 
   const registerUser=asyncHandler(async (req ,res)=>{
-    const {username,fullname,email,age,gender,role,password}=req.body;
+    const {username,email,role,password}=req.body;
 
 
     if (!username) {
         throw new Error("Username is required");
       }
-    if (!fullname) {
-        throw new Error("Full name is required");
-      }
-      
+
       if (!email) {
         throw new Error("Email is required");
       }
       
       if (!password) {
         throw new Error("Password is required");
-      }
-    
-      if (!age || isNaN(age) || Number(age) <= 0) {
-        throw new Error("Valid age is required");
-      }
-      
-      if (!gender) {
-        throw new Error("Gender is required");
       }
       
       if (!role) {
@@ -66,10 +55,8 @@ const generateAccessAndRefreshTokens = async (userId) => {
         
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        fullname: fullname.trim().toLowerCase(),
+        fullname: username.trim().toLowerCase(),
 
-        age: Number(age),
-        gender,
         role,
         password: password,
         provider: "local",

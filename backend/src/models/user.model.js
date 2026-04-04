@@ -35,19 +35,12 @@ const userSchema = new mongoose.Schema(
     },
     age: {
     type: Number,
-    required: function () {
-      // only required for manually registered users
-      return this.provider === "local";
-    },
   },
 
 
     gender: {
     type: String,
     enum: ["male", "female", "other", "prefer_not_to_say"],
-    required: function () {
-      return this.provider === "local";
-    },
   },
 
     avatar:{
