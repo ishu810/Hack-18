@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import AuthButton from '../components/auth/AuthButton';
 import AuthInput from '../components/auth/AuthInput';
 import AuthLayout from '../components/auth/AuthLayout';
+import { loginUser } from '../api';
 
 const MotionForm = motion.form;
 
@@ -11,6 +12,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const [form, setForm] = useState({ email: '', password: '' });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const updateField = (event) => {
     const { name, value } = event.target;
@@ -19,10 +21,20 @@ export default function LoginPage() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    setError('');
     setLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    setLoading(false);
-    navigate('/agent-home');
+    try {
+      await loginUser({
+        email: form.email,
+        password: form.password,
+      });
+
+      navigate('/agent-home');
+    } catch (submitError) {
+      setError(submitError.message || 'Unable to connect to server. Please check backend status.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -74,6 +86,8 @@ export default function LoginPage() {
             Forgot Password?
           </Link>
         </div>
+
+        {error ? <p className="text-sm text-red-300">{error}</p> : null}
 
         <AuthButton label="Enter System" loading={loading} />
       </MotionForm>
