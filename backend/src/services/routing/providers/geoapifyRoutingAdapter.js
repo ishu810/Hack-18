@@ -73,11 +73,22 @@ export async function computeRouteWithGeoapify({ waypoints, mode = 'drive', opti
     const feature = data?.features?.[0];
     const polyline = parsePolyline(feature);
 
+    const distanceValue = Number(feature?.properties?.distance) || 0;
+    const durationValue = Number(feature?.properties?.time) || 0;
+    
+    console.log('[Geoapify Route Response]', {
+      distanceMeters: distanceValue,
+      durationSeconds: durationValue,
+      distanceKm: distanceValue / 1000,
+      durationHours: durationValue / 3600,
+      properties: feature?.properties,
+    });
+
     return {
       ok: true,
       route: {
-        distance: Number(feature?.properties?.distance) || 0,
-        duration: Number(feature?.properties?.time) || 0,
+        distance: distanceValue,
+        duration: durationValue,
         polyline,
         legs: Array.isArray(feature?.properties?.legs) ? feature.properties.legs : [],
         provider: 'geoapify',

@@ -160,7 +160,10 @@ const buildNearbyDayGrouping = (selectedPlaces = [], tripDays = 1) => {
       });
 
       const remainingDays = Math.max(0, days - dayIndex - 1);
-      const adaptiveLimitKm = dayPlaces.length === 1 ? 55 : 40;
+      // Dynamic distance limits based on number of places already in the day
+      const maxDistanceFirstPlace = Number(process.env.DAY_GROUPING_MAX_DIST_FIRST || 55);
+      const maxDistanceSubsequentPlaces = Number(process.env.DAY_GROUPING_MAX_DIST_SUBSEQUENT || 40);
+      const adaptiveLimitKm = dayPlaces.length === 1 ? maxDistanceFirstPlace : maxDistanceSubsequentPlaces;
       const shouldBreakForDistance = nearestDist > adaptiveLimitKm && unassigned.length > remainingDays;
 
       if (nearestIdx < 0 || shouldBreakForDistance) break;
@@ -896,7 +899,10 @@ const generatePlaces = asyncHandler(async (req, res) => {
 
         return fetchedPlaces
           // Keep place assignments tight to checkpoint to avoid wrong-city cards.
-          .filter((place) => distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= 45)
+          .filter((place) => {
+            const maxPlaceDistanceKm = Number(process.env.MAX_PLACE_DISTANCE_FROM_CENTER || 45);
+            return distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= maxPlaceDistanceKm;
+          })
           .map((place) => ({
             name: place.name,
             lat: place.lat,

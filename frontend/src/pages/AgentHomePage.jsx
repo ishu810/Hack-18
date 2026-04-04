@@ -213,7 +213,9 @@ function findBestRoute(origin, destination, stops) {
   }
   total += distanceKmCoords(current, destination);
   ordered.push(destination);
-  return { route: ordered, totalDistance: Math.round(total), estimatedHours: Math.max(1, Math.round(total / 780)) };
+  // Estimate hours at 50 km/h average speed
+  const estimatedHours = Math.max(1, Math.round((total / 50) * 10) / 10);
+  return { route: ordered, totalDistance: Math.round(total), estimatedHours };
 }
 
 function formatDurationFromMinutes(totalMinutes = 0) {
@@ -340,11 +342,12 @@ export default function AgentHomePage() {
     }))
     .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)), [activeRoute]);
   const routeMapPath = useMemo(() => routeMapPoints.map((p) => [p.lat, p.lng]), [routeMapPoints]);
-  const routeWaypointHash = useMemo(() => buildWaypointHash(routeMapPoints), [routeMapPoints]);
+  const finalizedRouteHash = JSON.stringify(finalizedRoute.map((p) => ({ name: p.name, lat: p.lat, lng: p.lng })));
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
 
   useEffect(() => {
-    if (!result || routeMapPoints.length < 2) {
+    // Only compute metrics when in Step 2 and have a valid route with 2+ points
+    if (currentStep !== 2 || !result || routeMapPoints.length < 2) {
       setLiveRouteMetrics(null);
       return;
     }
@@ -360,12 +363,15 @@ export default function AgentHomePage() {
         });
 
         if (cancelled) return;
+        
+        // Extract metrics from response
         const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-        if (metrics.distanceKm > 0 || metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0) {
-          setLiveRouteMetrics(metrics);
-        }
-      } catch {
+        
+        // Always set metrics, even if zero (so they don't fall back to old values)
+        setLiveRouteMetrics(metrics);
+      } catch (err) {
         if (!cancelled) {
+          // On error, set empty metrics so it falls back to result values
           setLiveRouteMetrics(null);
         }
       } finally {
@@ -379,12 +385,20 @@ export default function AgentHomePage() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [result, routeWaypointHash, routeMapPoints]);
+  }, [currentStep, result, routeMapPoints, finalizedRouteHash]);
 
   const effectiveDistanceKm = liveRouteMetrics?.distanceKm > 0
     ? Math.max(1, Math.round(liveRouteMetrics.distanceKm))
     : Number(result?.totalDistance || 0);
-  const effectiveMinutes = liveRouteMetrics?.estimatedMinutes || liveRouteMetrics?.durationMinutes || 0;
+  
+  // Prefer actual duration from API if available, otherwise use estimated
+  let effectiveMinutes = 0;
+  if (liveRouteMetrics?.durationSeconds > 0) {
+    effectiveMinutes = Math.round(liveRouteMetrics.durationSeconds / 60);
+  } else if (liveRouteMetrics?.estimatedMinutes > 0) {
+    effectiveMinutes = liveRouteMetrics.estimatedMinutes;
+  }
+  
   const effectiveDurationLabel = effectiveMinutes > 0
     ? formatDurationFromMinutes(effectiveMinutes)
     : `${Math.max(1, Number(result?.estimatedHours || 1))} hrs`;
@@ -507,10 +521,29 @@ export default function AgentHomePage() {
       });
 
       const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-      const totalDistance = metrics.distanceKm > 0 ? Math.max(1, Math.round(metrics.distanceKm)) : optimized.totalDistance;
-      const estimatedHours = (metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0)
-        ? Math.max(1, Math.round((metrics.estimatedMinutes || metrics.durationMinutes) / 60))
-        : optimized.estimatedHours;
+      console.log('Route metrics:', {
+        distanceKm: metrics.distanceKm,
+        durationSeconds: metrics.durationSeconds,
+        durationMinutes: metrics.durationMinutes,
+        estimatedMinutes: metrics.estimatedMinutes,
+      });
+      
+      let totalDistance = optimized.totalDistance;
+      let estimatedHours = optimized.estimatedHours;
+      
+      // Prefer API distance if available and positive
+      if (metrics.distanceKm > 0) {
+        totalDistance = Math.max(1, Math.round(metrics.distanceKm));
+      }
+      
+      // Prefer actual duration from API if available
+      if (metrics.durationSeconds > 0) {
+        estimatedHours = Math.max(1, Math.round(metrics.durationSeconds / 3600 * 10) / 10);
+      } 
+      // Otherwise use estimated time from distance
+      else if (metrics.estimatedMinutes > 0) {
+        estimatedHours = Math.max(1, Math.round(metrics.estimatedMinutes / 60 * 10) / 10);
+      }
 
       const journeyRecord = {
         id: Date.now(), createdAt: new Date().toISOString(),
