@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CloudSun, Plane, Hotel, MapPin, AlertCircle, Navigation, ChevronDown, ChevronUp, X, ExternalLink } from 'lucide-react';
+import {  Plane, Hotel, MapPin, AlertCircle, Navigation, ChevronDown, ChevronUp, X, ExternalLink } from 'lucide-react';
 
 const TravelAlerts = () => {
   const [openLeg, setOpenLeg] = useState(1);

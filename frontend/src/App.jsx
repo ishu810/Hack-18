@@ -16,8 +16,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/agent-home" element={<AgentHomePage />} />
-            <Route path="/travel-alerts" element={<TravelAlerts />} />
-                <Route path="/weather-dashboard" element={<WeatherDashboard  />} />
+        <Route path="/travel-alerts" element={<TravelAlerts />} />
+        <Route path="/weather-dashboard" element={<WeatherDashboard  />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </AnimatePresence>

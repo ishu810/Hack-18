@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plane, Hotel, Navigation, ChevronDown, ChevronUp, X, ExternalLink, AlertCircle, CloudSun } from 'lucide-react';
+// import { Hotel, Navigation, ChevronDown, ChevronUp, X, ExternalLink, AlertCircle, CloudSun } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import { 
-  CloudSun, Plane, Hotel, Navigation, ChevronDown, 
-  ChevronUp, X, ExternalLink, AlertCircle 
+  Plane, Hotel, Navigation, ChevronDown, 
+  ChevronUp, X, ExternalLink, AlertCircle ,CloudSun
 } from 'lucide-react';
 
 // Fix for default Leaflet icon markers in React
