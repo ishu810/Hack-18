@@ -6,6 +6,7 @@ import {
   generateItinerary,
   computeRoute,
   getFlightCost,
+  getTransportCost,
   estimateBudget,
 } from '../controllers/travel.controller.js';
 import { verifyJWT } from '../middlewares/auth.middleware.js';
@@ -17,6 +18,7 @@ router.use(verifyJWT);
 router.post('/create', createTrip);
 router.post('/route/compute', computeRoute);
 router.post('/flight-cost', getFlightCost);
+router.post('/transport-cost', getTransportCost);
 router.get('/:tripId/budget', estimateBudget);
 router.post('/:tripId/budget', estimateBudget);
 router.get('/:tripId/places', generatePlaces);

@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { createTrip, generateItinerary, generatePlaces, getFlightCost, logoutUser, selectPlaces } from '../api';
+import { createTrip, generateItinerary, generatePlaces, getTransportCost, logoutUser, selectPlaces } from '../api';
 import PlacesMap from '../components/PlacesMap';
 
 delete L.Icon.Default.prototype._getIconUrl;
@@ -361,7 +361,7 @@ export default function AgentHomePage() {
   const [finalizedRoute, setFinalizedRoute] = useState([]);
   const [stayPreferences, setStayPreferences] = useState({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
   const [segmentModes, setSegmentModes] = useState({});
-  const [flightFares, setFlightFares] = useState({});
+  const [transportCosts, setTransportCosts] = useState({});
   const [history, setHistory] = useState([]);
   const [error, setError] = useState('');
 
@@ -434,7 +434,16 @@ export default function AgentHomePage() {
       const to = normalized[index + 1];
       const distanceKm = Math.max(1, Math.round(distanceKmCoords(from, to)));
       const key = getSegmentKey(from.name, to.name);
-      segments.push({ key, from: from.name, to: to.name, distanceKm });
+      segments.push({
+        key,
+        from: from.name,
+        to: to.name,
+        distanceKm,
+        fromLat: from.lat,
+        fromLng: from.lng,
+        toLat: to.lat,
+        toLng: to.lng,
+      });
     }
     return segments;
   }, [activeRoute]);
@@ -453,7 +462,7 @@ export default function AgentHomePage() {
       });
       return next;
     });
-    setFlightFares((prev) => {
+    setTransportCosts((prev) => {
       const next = {};
       Object.entries(prev || {}).forEach(([key, value]) => {
         if (activeKeys.has(key)) next[key] = value;
@@ -463,47 +472,50 @@ export default function AgentHomePage() {
   }, [routeSegments]);
 
   useEffect(() => {
-    if (currentStep !== 3 || routeSegments.length === 0) return;
+    if (currentStep !== 3) return;
+
+    const segments = routeSegments
+      .map((segment) => ({
+        key: segment.key,
+        from: normalizeName(segment.from),
+        to: normalizeName(segment.to),
+        fromLat: Number(segment.fromLat),
+        fromLng: Number(segment.fromLng),
+        toLat: Number(segment.toLat),
+        toLng: Number(segment.toLng),
+      }))
+      .filter((segment) => segment.from && segment.to);
+
+    if (!segments.length) return;
 
     const loadingState = {};
-    routeSegments.forEach((segment) => {
-      loadingState[segment.key] = { loading: true, resolved: false, error: false, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null };
+    segments.forEach((segment) => {
+      loadingState[segment.key] = { loading: true, success: false };
     });
-    setFlightFares(loadingState);
+    setTransportCosts(loadingState);
 
     let cancelled = false;
 
-    const runFlightFetches = async () => {
-      const results = await Promise.allSettled(
-        routeSegments.map((segment) => getFlightCost({ from: segment.from, to: segment.to })
-          .then((data) => ({ key: segment.key, data }))
-          .catch(() => ({ key: segment.key, data: { minFare: null, fallback: true } })))
-      );
-
+    Promise.allSettled(
+      segments.map((segment) => getTransportCost(segment)
+        .then((data) => ({ key: segment.key, data }))
+        .catch(() => ({ key: segment.key, data: { success: false } })))
+    ).then((results) => {
       if (cancelled) return;
 
-      const fareUpdates = {};
+      const updates = {};
       results.forEach((result) => {
         if (result.status !== 'fulfilled') return;
-        const { key, data } = result.value || {};
+        const key = result.value?.key;
         if (!key) return;
-
-        const minFare = Number(data?.minFare);
-        fareUpdates[key] = {
+        updates[key] = {
           loading: false,
-          resolved: true,
-          error: !Boolean(data?.success),
-          noFlights: Boolean(data?.fallback) && !Number.isFinite(minFare),
-          minFare: Number.isFinite(minFare) && minFare > 0 ? Math.round(minFare) : null,
-          currency: String(data?.currency || 'INR'),
-          oneWayMinutes: data?.oneWayMinutes != null && Number.isFinite(Number(data.oneWayMinutes)) ? Number(data.oneWayMinutes) : null,
+          ...(result.value?.data || { success: false }),
         };
       });
 
-      setFlightFares((prev) => ({ ...prev, ...fareUpdates }));
-    };
-
-    runFlightFetches();
+      setTransportCosts((prev) => ({ ...prev, ...updates }));
+    });
 
     return () => {
       cancelled = true;
@@ -522,70 +534,102 @@ export default function AgentHomePage() {
 
   const getModeMeta = (segment, mode, trainClass) => {
     const dist = Number(segment?.distanceKm || 0);
-    const timeMin = getModeDurationMinutes(mode, dist);
+    const timeMinFallback = getModeDurationMinutes(mode, dist);
+    const segmentData = transportCosts[segment.key] || {};
+    const results = segmentData?.results || {};
+    const summary = segmentData?.summary || {};
+
+    const flight = results.flight || {};
+    const train = results.train || {};
+    const bus = results.bus || {};
+    const car = results.car || {};
+
+    const cheapestBadge = summary?.cheapestMode === mode;
+    const fastestBadge = summary?.fastestMode === mode;
+
+    if (mode === 'flight') {
+      const minFare = Number(flight?.minFare || 0);
+      if (segmentData?.loading) {
+        return {
+          timeMin: timeMinFallback,
+          costValue: Number.POSITIVE_INFINITY,
+          costLabel: 'Fetching live fare...',
+          sourceLabel: '',
+          fallback: false,
+          cheapestBadge,
+          fastestBadge,
+        };
+      }
+
+      if (Number.isFinite(minFare) && minFare > 0) {
+        return {
+          timeMin: Number(flight?.durationMinutes || timeMinFallback),
+          costValue: minFare,
+          costLabel: `${formatInr(minFare)} (live)`,
+          sourceLabel: flight?.source === 'kiwi_api' ? 'Live fare from Kiwi' : '',
+          fallback: Boolean(flight?.fallback),
+          cheapestBadge,
+          fastestBadge,
+        };
+      }
+
+      return {
+        timeMin: Number(flight?.durationMinutes || timeMinFallback),
+        costValue: 4000,
+        costLabel: 'Live fare unavailable - ₹4,000-12,000 est.',
+        sourceLabel: '',
+        fallback: true,
+        cheapestBadge,
+        fastestBadge,
+      };
+    }
 
     if (mode === 'train') {
       const selectedClass = trainClass || '3A';
-      const fare = getTrainFare(dist, selectedClass);
+      const classes = train?.classes || {};
+      const liveClassFare = Number(classes?.[selectedClass]?.fare || 0);
+      const fallbackFare = getTrainFare(dist, selectedClass);
+      const fare = Number.isFinite(liveClassFare) && liveClassFare > 0 ? liveClassFare : fallbackFare;
+      const sourceLabel = train?.source === 'irctc_api' ? 'Live IRCTC data' : 'IR fare table (est.)';
       return {
-        timeMin,
+        timeMin: Number(train?.durationMinutes || timeMinFallback),
         costValue: fare,
         costLabel: `${formatInr(fare)} (${selectedClass})`,
+        sourceLabel,
+        fallback: !Boolean(train?.success) || Boolean(train?.fallback),
+        cheapestBadge,
+        fastestBadge,
       };
     }
 
     if (mode === 'bus') {
-      const base = Math.round(dist * 1.1);
-      const min = Math.round(base * 0.8);
-      const max = Math.round(base * 1.3);
+      const liveFare = Number(bus?.recommendedFare || 0);
+      const fallbackFare = Math.max(1, Math.round(dist * 1.1));
+      const fare = Number.isFinite(liveFare) && liveFare > 0 ? liveFare : fallbackFare;
       return {
-        timeMin,
-        costValue: min,
-        costLabel: formatInrRange(min, max),
+        timeMin: Number(bus?.durationMinutes || timeMinFallback),
+        costValue: fare,
+        costLabel: `${formatInr(fare)}`,
+        sourceLabel: bus?.source === 'geoapify_routing' ? 'Road distance via Geoapify' : 'Distance estimate (est.)',
+        fallback: !Boolean(bus?.success) || Boolean(bus?.fallback),
+        busFares: bus?.fares || null,
+        cheapestBadge,
+        fastestBadge,
       };
     }
 
-    if (mode === 'car') {
-      const base = Math.round(dist * 13);
-      const min = Math.round(base * 0.9);
-      const max = Math.round(base * 1.1);
-      return {
-        timeMin,
-        costValue: min,
-        costLabel: formatInrRange(min, max),
-      };
-    }
-
-    const fareState = flightFares[segment.key];
-    if (fareState?.loading) {
-      return {
-        timeMin,
-        costValue: Number.POSITIVE_INFINITY,
-        costLabel: 'Fetching live fare...',
-      };
-    }
-
-    if (fareState?.noFlights) {
-      return {
-        timeMin,
-        costValue: Number.POSITIVE_INFINITY,
-        costLabel: 'No flights available',
-      };
-    }
-
-    if (fareState?.minFare) {
-      const apiTime = fareState?.oneWayMinutes;
-      return {
-        timeMin: apiTime != null && Number.isFinite(Number(apiTime)) ? Number(apiTime) : timeMin,
-        costValue: Number(fareState.minFare),
-        costLabel: `${formatInr(fareState.minFare)} (live)`,
-      };
-    }
+    const liveCarFare = Number(car?.fare || 0);
+    const fallbackCarFare = Math.max(1, Math.round(dist * 13));
+    const finalCarFare = Number.isFinite(liveCarFare) && liveCarFare > 0 ? liveCarFare : fallbackCarFare;
 
     return {
-      timeMin,
-      costValue: 4000,
-      costLabel: '\u20b94,000 - \u20b912,000 (est.)',
+      timeMin: Number(car?.durationMinutes || timeMinFallback),
+      costValue: finalCarFare,
+      costLabel: `${formatInr(finalCarFare)}`,
+      sourceLabel: 'Calculated road estimate',
+      fallback: !Boolean(car?.success),
+      cheapestBadge,
+      fastestBadge,
     };
   };
 
@@ -946,7 +990,7 @@ export default function AgentHomePage() {
     setShowPreviewAddBox(false); setShowPreviewEditBox(false);
     setEditingRouteIndex(null); setEditStopInput(''); setEditNights(1); setEditStopSelection(null);
     setStayPreferences({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
-    setSegmentModes({}); setFlightFares({});
+    setSegmentModes({}); setTransportCosts({});
     setCheckpointPlaces({}); setPlacesLoading(false); setPlacesError('');
     setPlacesRequestKey(''); setHiddenPlaces({}); setDraftTripId(''); setItineraryLoading(false);
     setCurrentStep(1);
@@ -1326,14 +1370,14 @@ export default function AgentHomePage() {
                     costLabel: meta.costLabel,
                     costValue: Number(meta.costValue),
                     timeMin: Number(meta.timeMin),
+                    sourceLabel: meta.sourceLabel,
+                    fallback: Boolean(meta.fallback),
+                    cheapestBadge: Boolean(meta.cheapestBadge),
+                    fastestBadge: Boolean(meta.fastestBadge),
+                    busFares: meta.busFares || null,
                   };
                 });
-
-                const validForCompare = modeCards.filter((card) => Number.isFinite(card.costValue) && card.costValue < Number.POSITIVE_INFINITY);
-                const cheapest = validForCompare.length
-                  ? validForCompare.reduce((best, card) => (card.costValue < best.costValue ? card : best), validForCompare[0])
-                  : null;
-                const fastest = modeCards.reduce((best, card) => (card.timeMin < best.timeMin ? card : best), modeCards[0]);
+                const trainClassOptions = Object.values(transportCosts?.[segment.key]?.results?.train?.classes || {});
 
                 return (
                   <div key={segment.key}>
@@ -1355,16 +1399,16 @@ export default function AgentHomePage() {
                           onClick={() => selectSegmentMode(segment, card.key)}
                           className={`relative rounded-xl border bg-slate-950/60 p-4 text-center transition hover:border-amber-300/40 ${card.isSelected ? 'border-2 border-amber-300/70 bg-amber-300/5' : 'border-slate-700'}`}
                         >
-                          {fastest?.key === card.key ? (
+                          {card.fastestBadge ? (
                             <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-blue-400/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">Fastest</span>
                           ) : null}
-                          {cheapest?.key === card.key ? (
+                          {card.cheapestBadge ? (
                             <span className="absolute -top-2 right-2 whitespace-nowrap rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">Cheapest</span>
                           ) : null}
                           {modeIcon(card.key)}
                           <p className="mt-2 text-xs font-medium text-slate-300">{card.label}</p>
                           <p className="mt-1 text-sm font-semibold text-slate-100">
-                            {card.key === 'flight' && flightFares[segment.key]?.loading ? (
+                            {card.key === 'flight' && transportCosts[segment.key]?.loading ? (
                               <span className="inline-flex items-center gap-2">
                                 <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-500 border-t-cyan-300" />
                                 Fetching live fare...
@@ -1372,20 +1416,27 @@ export default function AgentHomePage() {
                             ) : card.costLabel}
                           </p>
                           <p className="mt-0.5 text-xs text-slate-500">{formatDuration(card.timeMin)}</p>
+                          {card.sourceLabel ? <p className="mt-1 text-[10px] text-slate-500">{card.sourceLabel}</p> : null}
+                          {card.fallback ? <p className="mt-1 text-[10px] text-slate-500">est.</p> : null}
+                          {card.key === 'bus' && card.busFares ? (
+                            <p className="mt-1 text-[10px] text-slate-500">
+                              O: {formatInr(card.busFares?.ordinary?.fare || 0)} | E: {formatInr(card.busFares?.express?.fare || 0)} | AC: {formatInr(card.busFares?.ac?.fare || 0)}
+                            </p>
+                          ) : null}
                         </button>
                       ))}
                     </div>
 
                     {selected.mode === 'train' ? (
                       <div className="mt-2 flex flex-wrap gap-2">
-                        {['SL', '3A', '2A', '1A'].map((cls) => (
+                        {(trainClassOptions.length ? trainClassOptions : ['SL', '3A', '2A', '1A'].map((cls) => ({ className: cls, fare: getTrainFare(segment.distanceKm, cls) }))).map((cls) => (
                           <button
-                            key={`${segment.key}-${cls}`}
+                            key={`${segment.key}-${cls.className}`}
                             type="button"
-                            onClick={() => selectTrainClass(segment, cls)}
-                            className={`rounded-lg border px-3 py-1.5 text-xs transition ${selected.trainClass === cls ? 'border-amber-300/60 bg-amber-300/10 text-amber-200' : 'border-slate-700 text-slate-400'}`}
+                            onClick={() => selectTrainClass(segment, cls.className)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs transition ${selected.trainClass === cls.className ? 'border-amber-300/60 bg-amber-300/10 text-amber-200' : 'border-slate-700 text-slate-400'}`}
                           >
-                            {cls}
+                            {cls.className} - {formatInr(cls.fare || getTrainFare(segment.distanceKm, cls.className))}
                           </button>
                         ))}
                       </div>

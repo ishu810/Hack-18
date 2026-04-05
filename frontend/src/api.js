@@ -90,6 +90,13 @@ export function getFlightCost(payload) {
   });
 }
 
+export function getTransportCost({ from, to, fromLat, fromLng, toLat, toLng }) {
+  return apiRequest('/api/travel/transport-cost', {
+    method: 'POST',
+    body: JSON.stringify({ from, to, fromLat, fromLng, toLat, toLng }),
+  });
+}
+
 export async function fetchBudgetEstimate(tripId, payload = {}) {
   const hasPayload = Boolean(payload && Object.keys(payload).length > 0);
 

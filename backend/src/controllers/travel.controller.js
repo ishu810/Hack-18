@@ -60,6 +60,30 @@ const KIWI_CITY_IATA = {
   mysore: 'MYQ',
 };
 
+const IATA_CODES = {
+  lucknow: 'LKO', delhi: 'DEL', 'new delhi': 'DEL', agra: 'AGR',
+  mumbai: 'BOM', bangalore: 'BLR', bengaluru: 'BLR', hyderabad: 'HYD',
+  chennai: 'MAA', kolkata: 'CCU', jaipur: 'JAI', udaipur: 'UDR',
+  goa: 'GOI', pune: 'PNQ', ahmedabad: 'AMD', varanasi: 'VNS',
+  amritsar: 'ATQ', chandigarh: 'IXC', kochi: 'COK', indore: 'IDR',
+  bhopal: 'BHO', nagpur: 'NAG', patna: 'PAT', ranchi: 'IXR',
+  bhubaneswar: 'BBI', guwahati: 'GAU', srinagar: 'SXR', leh: 'IXL',
+  jammu: 'IXJ', jodhpur: 'JDH', jaisalmer: 'JSA', bikaner: 'BKB',
+};
+
+const IR_STATION_CODES = {
+  lucknow: 'LKO', delhi: 'NDLS', 'new delhi': 'NDLS', agra: 'AGC',
+  'agra cantt': 'AGC', mumbai: 'CSTM', 'mumbai central': 'BCT',
+  bangalore: 'SBC', bengaluru: 'SBC', hyderabad: 'SC', secunderabad: 'SC',
+  chennai: 'MAS', kolkata: 'HWH', howrah: 'HWH', jaipur: 'JP',
+  udaipur: 'UDZ', goa: 'MAO', madgaon: 'MAO', pune: 'PUNE',
+  ahmedabad: 'ADI', varanasi: 'BSB', amritsar: 'ASR',
+  chandigarh: 'CDG', kochi: 'ERS', ernakulam: 'ERS',
+  indore: 'INDB', bhopal: 'BPL', nagpur: 'NGP', patna: 'PNBE',
+  ranchi: 'RNC', bhubaneswar: 'BBS', guwahati: 'GHY',
+  srinagar: 'JAT', jammu: 'JAT', jodhpur: 'JU',
+};
+
 const normalizeCityToken = (value = '') => String(value || '')
   .toLowerCase()
   .replace(/[^a-z\s]/g, ' ')
@@ -2191,6 +2215,383 @@ const getFlightCost = asyncHandler(async (req, res) => {
   }
 });
 
+const parseTrainFareFromSeatPayload = (payload = {}) => {
+  const data = payload?.data;
+  const directCandidates = [
+    payload?.ticket_fare,
+    payload?.fare,
+    payload?.total_fare,
+    payload?.base_fare,
+    data?.ticket_fare,
+    data?.fare,
+    data?.total_fare,
+    data?.base_fare,
+  ];
+
+  for (const value of directCandidates) {
+    const fare = toFiniteNumber(value);
+    if (Number.isFinite(fare) && fare > 0) return fare;
+  }
+
+  const list = Array.isArray(data)
+    ? data
+    : Array.isArray(payload?.availability)
+      ? payload.availability
+      : [];
+
+  for (const item of list) {
+    const fare = toFiniteNumber(item?.ticket_fare ?? item?.fare ?? item?.total_fare ?? item?.base_fare);
+    if (Number.isFinite(fare) && fare > 0) return fare;
+  }
+
+  return null;
+};
+
+const fetchSeatFareForClass = async ({ trainNo, classType, fromCode, toCode, dateStr }) => {
+  if (!trainNo || !classType || !fromCode || !toCode || !dateStr) return null;
+
+  try {
+    const response = await withTimeout(
+      axios.get('https://irctc1.p.rapidapi.com/api/v1/checkSeatAvailability', {
+        params: {
+          classType,
+          fromStationCode: fromCode,
+          toStationCode: toCode,
+          trainNo,
+          quota: 'GN',
+          date: dateStr,
+        },
+        headers: {
+          'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+          'X-RapidAPI-Host': 'irctc1.p.rapidapi.com',
+        },
+        timeout: 10000,
+      }),
+      12000,
+      `Train seat API ${trainNo}-${classType}`
+    );
+
+    const fare = parseTrainFareFromSeatPayload(response.data || {});
+    return Number.isFinite(fare) && fare > 0 ? fare : null;
+  } catch (_error) {
+    return null;
+  }
+};
+
+async function fetchTrainCost(from, to) {
+  const fromCode = IR_STATION_CODES[String(from || '').toLowerCase().trim()];
+  const toCode = IR_STATION_CODES[String(to || '').toLowerCase().trim()];
+
+  if (!fromCode || !toCode) {
+    return { success: false, reason: 'station_not_found', fallback: true };
+  }
+
+  const journeyDate = new Date();
+  journeyDate.setDate(journeyDate.getDate() + 7);
+  const dateStr = journeyDate.toISOString().slice(0, 10).replace(/-/g, '');
+  const seatDateStr = journeyDate.toISOString().slice(0, 10).split('-').reverse().join('-');
+
+  const response = await withTimeout(
+    axios.get('https://irctc1.p.rapidapi.com/api/v3/trainBetweenStations', {
+      params: {
+        fromStationCode: fromCode,
+        toStationCode: toCode,
+        dateOfJourney: dateStr,
+      },
+      headers: {
+        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+        'X-RapidAPI-Host': 'irctc1.p.rapidapi.com',
+      },
+      timeout: 10000,
+    }),
+    12000,
+    'Train API'
+  );
+
+  const trains = Array.isArray(response.data?.data) ? response.data.data : [];
+  if (!trains.length) {
+    return { success: false, reason: 'no_trains_found', fallback: true };
+  }
+
+  const classMap = {};
+  const targetClasses = ['SL', '3A', '2A', '1A', 'CC', '2S'];
+
+  trains.slice(0, 5).forEach((train) => {
+    const classes = Array.isArray(train?.class_type) ? train.class_type : [];
+    classes.forEach((cls) => {
+      if (typeof cls === 'string') {
+        if (targetClasses.includes(cls) && !classMap[cls]) {
+          classMap[cls] = { className: cls, fare: null, available: true };
+        }
+        return;
+      }
+
+      const className = String(cls?.class_type || cls?.className || '').trim();
+      if (!targetClasses.includes(className) || classMap[className]) return;
+      classMap[className] = {
+        className,
+        fare: toFiniteNumber(cls?.fare) || null,
+        available: cls?.available !== false,
+      };
+    });
+  });
+
+  const trainScanList = trains.slice(0, 3);
+  const classNames = Object.keys(classMap);
+
+  await Promise.all(classNames.map(async (className) => {
+    if (Number.isFinite(toFiniteNumber(classMap[className]?.fare))) return;
+
+    for (const train of trainScanList) {
+      const trainClasses = Array.isArray(train?.class_type)
+        ? train.class_type.map((value) => (typeof value === 'string' ? value : String(value?.class_type || value?.className || '').trim()))
+        : [];
+      if (!trainClasses.includes(className)) continue;
+
+      const fare = await fetchSeatFareForClass({
+        trainNo: String(train?.train_number || '').trim(),
+        classType: className,
+        fromCode,
+        toCode,
+        dateStr: seatDateStr,
+      });
+
+      if (Number.isFinite(toFiniteNumber(fare)) && Number(fare) > 0) {
+        classMap[className] = {
+          ...classMap[className],
+          fare: Number(fare),
+          available: true,
+        };
+        break;
+      }
+    }
+  }));
+
+  const available = Object.values(classMap)
+    .filter((item) => Number.isFinite(Number(item?.fare)) && Number(item.fare) > 0)
+    .sort((a, b) => Number(a.fare) - Number(b.fare));
+
+  const cheapest = available[0] || null;
+  const recommended = classMap['3A'] || classMap.SL || cheapest;
+
+  const firstTrain = trains[0] || {};
+  const durationStr = String(firstTrain?.duration || '').trim();
+  const [dHours, dMins] = durationStr.split(':').map(Number);
+  const durationMinutes = Number.isFinite(dHours) && Number.isFinite(dMins)
+    ? ((dHours * 60) + dMins)
+    : null;
+
+  return {
+    success: true,
+    fallback: !Boolean(cheapest?.fare || recommended?.fare),
+    source: 'irctc_api',
+    trainCount: trains.slice(0, 3).map((train) => ({
+      name: train?.train_name || '',
+      number: train?.train_number || '',
+      departure: train?.from_std || '',
+      arrival: train?.to_std || '',
+      duration: train?.duration || '',
+    })),
+    classes: classMap,
+    cheapestFare: cheapest?.fare || null,
+    cheapestClass: cheapest?.className || null,
+    recommendedFare: recommended?.fare || null,
+    recommendedClass: recommended?.className || null,
+    durationMinutes,
+    currency: 'INR',
+  };
+}
+
+async function fetchBusCost(from, to, fromLat, fromLng, toLat, toLng) {
+  if (!Number.isFinite(fromLat) || !Number.isFinite(fromLng) || !Number.isFinite(toLat) || !Number.isFinite(toLng)) {
+    return { success: false, reason: 'missing_coordinates', fallback: true };
+  }
+
+  const response = await withTimeout(
+    axios.get('https://api.geoapify.com/v1/routing', {
+      params: {
+        waypoints: `${fromLat},${fromLng}|${toLat},${toLng}`,
+        mode: 'drive',
+        apiKey: process.env.GEOAPIFY_API_KEY,
+      },
+      timeout: 8000,
+    }),
+    10000,
+    'Geoapify Routing (bus distance)'
+  );
+
+  const feature = response.data?.features?.[0];
+  const props = feature?.properties;
+  if (!props) {
+    return { success: false, reason: 'route_not_found', fallback: true };
+  }
+
+  const roadDistanceKm = Math.max(1, Math.round((props.distance || 0) / 1000));
+  const durationMinutes = Math.round((props.time || 0) / 60);
+
+  const ordinaryFare = Math.round(roadDistanceKm * 0.85);
+  const expressFare = Math.round(roadDistanceKm * 1.10);
+  const acFare = Math.round(roadDistanceKm * 1.80);
+  const sleeperFare = Math.round(roadDistanceKm * 1.50);
+  const busDurationMinutes = Math.round(durationMinutes * 1.25);
+
+  return {
+    success: true,
+    fallback: false,
+    source: 'geoapify_routing',
+    roadDistanceKm,
+    durationMinutes: busDurationMinutes,
+    fares: {
+      ordinary: { fare: ordinaryFare, label: 'Ordinary (State Bus)' },
+      express: { fare: expressFare, label: 'Express / Semi-Deluxe' },
+      sleeper: { fare: sleeperFare, label: 'Sleeper Bus (overnight)' },
+      ac: { fare: acFare, label: 'AC Volvo' },
+    },
+    cheapestFare: ordinaryFare,
+    recommendedFare: expressFare,
+    currency: 'INR',
+  };
+}
+
+const getTransportCost = asyncHandler(async (req, res) => {
+  const { from, to, fromLat, fromLng, toLat, toLng } = req.body || {};
+
+  if (!from || !to) {
+    return res.status(400).json({ success: false, message: 'from and to are required' });
+  }
+
+  const normalizedFrom = String(from || '').trim();
+  const normalizedTo = String(to || '').trim();
+  let srcLat = toFiniteNumber(fromLat);
+  let srcLng = toFiniteNumber(fromLng);
+  let dstLat = toFiniteNumber(toLat);
+  let dstLng = toFiniteNumber(toLng);
+
+  if (!Number.isFinite(srcLat) || !Number.isFinite(srcLng) || !Number.isFinite(dstLat) || !Number.isFinite(dstLng)) {
+    const [fromCenter, toCenter] = await Promise.all([
+      geocodeWithGeoapify(normalizedFrom),
+      geocodeWithGeoapify(normalizedTo),
+    ]);
+
+    if ((!Number.isFinite(srcLat) || !Number.isFinite(srcLng)) && fromCenter) {
+      srcLat = toFiniteNumber(fromCenter.lat);
+      srcLng = toFiniteNumber(fromCenter.lng);
+    }
+    if ((!Number.isFinite(dstLat) || !Number.isFinite(dstLng)) && toCenter) {
+      dstLat = toFiniteNumber(toCenter.lat);
+      dstLng = toFiniteNumber(toCenter.lng);
+    }
+  }
+
+  const [flightResult, trainResult, busResult] = await Promise.allSettled([
+    (async () => {
+      const fromCode = IATA_CODES[normalizedFrom.toLowerCase().trim()];
+      const toCode = IATA_CODES[normalizedTo.toLowerCase().trim()];
+
+      if (!fromCode || !toCode) {
+        return { success: false, fallback: true, reason: 'iata_not_found' };
+      }
+
+      const response = await withTimeout(
+        axios.get('https://kiwi-com-cheap-flights.p.rapidapi.com/round-trip', {
+          params: { source: fromCode, destination: toCode, currency: 'INR', adults: 1 },
+          headers: {
+            'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+            'X-RapidAPI-Host': 'kiwi-com-cheap-flights.p.rapidapi.com',
+          },
+          timeout: 8000,
+        }),
+        10000,
+        'Flight API'
+      );
+
+      const summary = extractKiwiItinerarySummary(response.data);
+      const minFare = summary?.price ? Math.round(summary.price / 2) : null;
+
+      let durationMinutes = summary?.duration || null;
+      if (!durationMinutes && Number.isFinite(srcLat) && Number.isFinite(srcLng) && Number.isFinite(dstLat) && Number.isFinite(dstLng)) {
+        durationMinutes = Math.round((distanceKm({ lat: srcLat, lng: srcLng }, { lat: dstLat, lng: dstLng }) / 700) * 60 + 150);
+      }
+
+      return {
+        success: true,
+        fallback: !minFare,
+        source: 'kiwi_api',
+        minFare,
+        recommendedFare: minFare,
+        currency: 'INR',
+        durationMinutes,
+        note: minFare ? 'Live fare from Kiwi' : 'Airport overhead included in time estimate',
+      };
+    })(),
+    fetchTrainCost(normalizedFrom, normalizedTo).catch((err) => ({
+      success: false,
+      fallback: true,
+      reason: err?.message || 'train_api_failed',
+    })),
+    fetchBusCost(normalizedFrom, normalizedTo, srcLat, srcLng, dstLat, dstLng).catch((err) => ({
+      success: false,
+      fallback: true,
+      reason: err?.message || 'bus_api_failed',
+    })),
+  ]);
+
+  const flight = flightResult.status === 'fulfilled'
+    ? flightResult.value
+    : { success: false, fallback: true, reason: flightResult.reason?.message || 'flight_api_failed' };
+
+  const train = trainResult.status === 'fulfilled'
+    ? trainResult.value
+    : { success: false, fallback: true, reason: trainResult.reason?.message || 'train_api_failed' };
+
+  const bus = busResult.status === 'fulfilled'
+    ? busResult.value
+    : { success: false, fallback: true, reason: busResult.reason?.message || 'bus_api_failed' };
+
+  const distKm = (Number.isFinite(srcLat) && Number.isFinite(srcLng) && Number.isFinite(dstLat) && Number.isFinite(dstLng))
+    ? Math.max(1, Math.round(distanceKm({ lat: srcLat, lng: srcLng }, { lat: dstLat, lng: dstLng })))
+    : null;
+
+  const inferredCarDistanceKm = Number.isFinite(Number(distKm))
+    ? Number(distKm)
+    : (Number.isFinite(Number(bus?.roadDistanceKm)) ? Number(bus.roadDistanceKm) : 120);
+
+  const car = {
+    success: true,
+    fallback: !Number.isFinite(Number(distKm)),
+    source: 'calculated',
+    distanceKm: Math.max(1, Math.round(inferredCarDistanceKm)),
+    fare: Math.round(Math.max(1, inferredCarDistanceKm) * 13),
+    lowFare: Math.round(Math.max(1, inferredCarDistanceKm) * 11),
+    highFare: Math.round(Math.max(1, inferredCarDistanceKm) * 16),
+    durationMinutes: Math.round(((Math.max(1, inferredCarDistanceKm) * 1.2) / 65) * 60),
+    currency: 'INR',
+    note: 'Estimated at ₹11-16/km including fuel and driver',
+  };
+
+  console.log(`[TransportCost] ${normalizedFrom}->${normalizedTo} | flight:${Boolean(flight?.success)} train:${Boolean(train?.success)} bus:${Boolean(bus?.success)}`);
+
+  return res.json({
+    success: true,
+    segment: { from: normalizedFrom, to: normalizedTo },
+    results: { flight, train, bus, car },
+    summary: {
+      cheapestMode: [
+        { mode: 'flight', fare: flight?.recommendedFare || Infinity },
+        { mode: 'train', fare: train?.recommendedFare || Infinity },
+        { mode: 'bus', fare: bus?.recommendedFare || Infinity },
+        { mode: 'car', fare: car?.fare || Infinity },
+      ].sort((a, b) => a.fare - b.fare)[0]?.mode || 'train',
+      fastestMode: [
+        { mode: 'flight', mins: flight?.durationMinutes || Infinity },
+        { mode: 'train', mins: train?.durationMinutes || Infinity },
+        { mode: 'bus', mins: bus?.durationMinutes || Infinity },
+        { mode: 'car', mins: car?.durationMinutes || Infinity },
+      ].sort((a, b) => a.mins - b.mins)[0]?.mode || 'flight',
+    },
+  });
+});
+
 const estimateBudget = asyncHandler(async (req, res) => {
   const { tripId } = req.params;
   const trip = await Travel.findById(tripId);
@@ -2463,6 +2864,7 @@ export {
   generateItinerary,
   computeRoute,
   getFlightCost,
+  getTransportCost,
   estimateBudget,
   getFlightCost as fetchFlightCost,
 };
