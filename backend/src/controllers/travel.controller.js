@@ -10,7 +10,7 @@ const CACHE_TTL = 3600;
 const WEATHER_CACHE_TTL = 10800; 
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
 const GEOAPIFY_BASE_URL = 'https://api.geoapify.com';
-
+import crypto from "crypto";
 const getGeoapifyKey = () => {
   const raw = process.env.GEOAPIFY_API_KEY || process.env.GEOAPIFY_KEY || '';
   return raw.trim();
@@ -567,63 +567,103 @@ const buildStrictShortlist = (candidates = [], destination = '', days = 1) => {
 
   return sortPlacesBySelectionScore(shortlist);
 };
-
 const geocodeWithGeoapify = async (place) => {
   const apiKey = getGeoapifyKey();
   if (!apiKey || !place) return null;
-  const response = await axios.get(`${GEOAPIFY_BASE_URL}/v1/geocode/search`, {
-    params: {
-      text: place,
-      limit: 1,
-      apiKey
-    },
-    timeout: 10000
-  });
 
-  const feature = response.data?.features?.[0];
-  if (!feature) return null;
+  // 1. Create a normalized cache key
+  // Using a prefix 'geo:' helps organize your Redis store
+  const cacheKey = `geo:${place.toLowerCase().trim().replace(/\s+/g, "_")}`;
 
-  return {
-    lat: toFiniteNumber(feature.geometry?.coordinates?.[1]),
-    lng: toFiniteNumber(feature.geometry?.coordinates?.[0]),
-    name: feature.properties?.formatted || place
-  };
+  try {
+    // 2. Check if the coordinates are already in Redis
+    const cachedCoords = await redisClient.get(cacheKey);
+    if (cachedCoords) {
+      return JSON.parse(cachedCoords);
+    }
+
+    // 3. If not cached, call the Geoapify API
+    const response = await axios.get(`${GEOAPIFY_BASE_URL}/v1/geocode/search`, {
+      params: {
+        text: place,
+        limit: 1,
+        apiKey,
+      },
+      timeout: 10000,
+    });
+
+    const feature = response.data?.features?.[0];
+    if (!feature) return null;
+
+    const result = {
+      lat: toFiniteNumber(feature.geometry?.coordinates?.[1]),
+      lng: toFiniteNumber(feature.geometry?.coordinates?.[0]),
+      name: feature.properties?.formatted || place,
+    };
+
+    // 4. Store the result in Redis for 24 hours (86,400 seconds)
+    // Locations don't move, so a long TTL is efficient.
+    await redisClient.setEx(cacheKey, 86400, JSON.stringify(result));
+
+    return result;
+  } catch (error) {
+    // Log the error but don't let a Redis/API failure crash the trip builder
+    console.error(`Geocoding error for ${place}:`, error.message);
+    return null;
+  }
 };
 
 const fetchGeoapifyPlaces = async ({ lat, lng, radius = 50000 }) => {
   const apiKey = getGeoapifyKey();
   if (!apiKey || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  const geoKey = `places:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}`;
+  try {
+    const cachedPlaces = await redisClient.get(geoKey);
+    if (cachedPlaces) {
+      return JSON.parse(cachedPlaces);
+    }
+    const categories = 'tourism.sights,tourism.attraction,entertainment,leisure,building.historic,natural';
+    const response = await axios.get(`${GEOAPIFY_BASE_URL}/v2/places`, {
+      params: {
+        categories,
+        filter: `circle:${lng},${lat},${radius}`,
+        limit: 80,
+        apiKey
+      },
+      timeout: 12000
+    });
+    const places = (response.data?.features || [])
+      .map((feature) => {
+        const name = feature.properties?.name?.trim();
+        if (!name) return null;
 
-  const categories = 'tourism.sights,tourism.attraction,entertainment,leisure,building.historic,natural';
-  const response = await axios.get(`${GEOAPIFY_BASE_URL}/v2/places`, {
-    params: {
-      categories,
-      filter: `circle:${lng},${lat},${radius}`,
-      limit: 80,
-      apiKey
-    },
-    timeout: 12000
-  });
+        const placeLat = toFiniteNumber(feature.geometry?.coordinates?.[1]);
+        const placeLng = toFiniteNumber(feature.geometry?.coordinates?.[0]);
 
-  return (response.data?.features || [])
-    .map((feature) => {
-      const name = feature.properties?.name?.trim();
-      if (!name) return null;
+        return {
+          name,
+          lat: placeLat,
+          lng: placeLng,
+          rating: toFiniteNumber(feature.properties?.rank?.confidence),
+          popularity: toFiniteNumber(feature.properties?.rank?.popularity),
+          category: Array.isArray(feature.properties?.categories) 
+            ? feature.properties.categories[0] 
+            : 'attraction',
+          address: feature.properties?.formatted || ''
+        };
+      })
+      .filter((item) => item && Number.isFinite(item.lat) && Number.isFinite(item.lng));
 
-      const placeLat = toFiniteNumber(feature.geometry?.coordinates?.[1]);
-      const placeLng = toFiniteNumber(feature.geometry?.coordinates?.[0]);
+    // 5. Save the cleaned array to Redis (TTL: 12 hours)
+    if (places.length > 0) {
+      await redisClient.setEx(geoKey, 43200, JSON.stringify(places));
+    }
 
-      return {
-        name,
-        lat: placeLat,
-        lng: placeLng,
-        rating: toFiniteNumber(feature.properties?.rank?.confidence),
-        popularity: toFiniteNumber(feature.properties?.rank?.popularity),
-        category: Array.isArray(feature.properties?.categories) ? feature.properties.categories[0] : 'attraction',
-        address: feature.properties?.formatted || ''
-      };
-    })
-    .filter((item) => item && Number.isFinite(item.lat) && Number.isFinite(item.lng));
+    return places;
+  } catch (error) {
+    console.error("Error in fetchGeoapifyPlaces (Redis/API):", error.message);
+    return [];
+  }
 };
 
 const enforceDestinationPriority = ({ selected = [], candidates = [], destination = '', maxCount = 12, days = 1 }) => {
@@ -798,115 +838,161 @@ Output JSON schema:
 
   return parsed;
 };
-
-const buildQueryVariants = (placeName, location, type) => {
+const buildQueryVariants = async (placeName, location, type) => {
   const safePlace = (placeName || '').trim();
   const safeLocation = (location || '').trim();
   const safeType = (type || '').trim();
 
-  const normalize = (value) => value
-    .replace(/[-_/]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const inputHash = crypto
+    .createHash("md5")
+    .update(`${safePlace}:${safeLocation}:${safeType}`.toLowerCase())
+    .digest("hex");
+  const cacheKey = `queries:${inputHash}`;
 
-  const placeNorm = normalize(safePlace);
-  const locationNorm = normalize(safeLocation);
-  const placeNoStopwords = placeNorm
-    .replace(/\b(the|of|de|la|le|ki|ka|and)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  try {
+    const cached = await redisClient.get(cacheKey);
+    if (cached) return JSON.parse(cached);
 
-  const candidates = [
-    `${placeNorm} ${locationNorm}`,
-    `${placeNorm} ${locationNorm} landmark`,
-    `${placeNorm} ${locationNorm} travel`,
-    `${placeNorm} ${locationNorm} tourism`,
-    `${placeNorm} ${locationNorm} ${safeType}`,
-    `${placeNoStopwords} ${locationNorm}`,
-    placeNorm,
-    `${placeNorm} landmark`,
-    `${placeNorm} travel`,
-    locationNorm,
-    `${locationNorm} city`,
-    `${locationNorm} tourism`
-  ].map(normalize).filter(Boolean);
+    const normalize = (value) => value
+      .replace(/[-_/]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-  return [...new Set(candidates)];
+    const placeNorm = normalize(safePlace);
+    const locationNorm = normalize(safeLocation);
+    const placeNoStopwords = placeNorm
+      .replace(/\b(the|of|de|la|le|ki|ka|and)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const candidates = [
+      `${placeNorm} ${locationNorm}`,
+      `${placeNorm} ${locationNorm} landmark`,
+      `${placeNorm} ${locationNorm} travel`,
+      `${placeNorm} ${locationNorm} tourism`,
+      `${placeNorm} ${locationNorm} ${safeType}`,
+      `${placeNoStopwords} ${locationNorm}`,
+      placeNorm,
+      `${placeNorm} landmark`,
+      `${placeNorm} travel`,
+      locationNorm,
+      `${locationNorm} city`,
+      `${locationNorm} tourism`
+    ].map(normalize).filter(Boolean);
+
+    const result = [...new Set(candidates)];
+
+    await redisClient.setEx(cacheKey, 86400, JSON.stringify(result));
+    return result;
+  } catch (error) {
+    console.error("Query Variant Cache Error:", error);
+    return [normalize(`${safePlace} ${safeLocation}`)].filter(Boolean);
+  }
 };
-
 const getUnsplashImage = async (queries, label) => {
   if (!process.env.UNSPLASH_ACCESS_KEY) return null;
 
   const queryList = Array.isArray(queries) ? queries : [queries];
+  const inputHash = crypto
+    .createHash("md5")
+    .update(JSON.stringify({ label, queries }).toLowerCase())
+    .digest("hex");
+  const cacheKey = `image:${inputHash}`;
 
-  for (const q of queryList) {
-    try {
-      const response = await axios.get('https://api.unsplash.com/search/photos', {
-        params: {
-          query: q.trim(),
-          per_page: 3
-        },
-        headers: {
-          Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`
-        },
-        timeout: 8000
-      });
+  try {
+    const cachedImage = await redisClient.get(cacheKey);
+    if (cachedImage) return cachedImage;
+    for (const q of queryList) {
+      try {
+        const response = await axios.get('https://api.unsplash.com/search/photos', {
+          params: {
+            query: q.trim(),
+            per_page: 3
+          },
+          headers: {
+            Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`
+          },
+          timeout: 8000
+        });
 
-      const image = response.data?.results?.find((r) => r?.urls?.regular || r?.urls?.full || r?.urls?.raw || r?.urls?.small || r?.urls?.thumb || r?.urls?.small_s3);
-      if (image) {
-        const chosen = image?.urls?.regular || image?.urls?.full || image?.urls?.raw || image?.urls?.small || image?.urls?.thumb || image?.urls?.small_s3 || null;
-        if (chosen) {
-          console.log(`Unsplash image for "${label || q}" found via query "${q}":`, chosen);
-          return chosen;
+        const results = response.data?.results || [];
+        const image = results.find((r) => r?.urls?.regular || r?.urls?.small);
+
+        if (image) {
+          const chosen = image.urls.regular || image.urls.small || null;
+          if (chosen) {
+            // 3. Cache the successful URL for 24 hours
+            await redisClient.setEx(cacheKey, 86400, chosen);
+            return chosen;
+          }
         }
+      } catch (e) {
+        console.warn(`Unsplash query "${q}" failed:`, e.message || e);
       }
-    } catch (e) {
-      console.warn(`Unsplash query "${q}" failed:`, e.message || e);
     }
+  } catch (error) {
+    console.error("Unsplash Cache/Execution Error:", error);
   }
 
-  console.warn('Unsplash: all query strategies exhausted for', label || queryList[0]);
   return null;
 };
-
 const getPexelsImage = async (queries, label) => {
   if (!process.env.PEXELS_API_KEY) return null;
 
   const queryList = Array.isArray(queries) ? queries : [queries];
+  
+  const inputHash = crypto
+    .createHash("md5")
+    .update(JSON.stringify({ label, queries }).toLowerCase())
+    .digest("hex");
+  const cacheKey = `image:pexels:${inputHash}`;
 
-  for (const q of queryList) {
-    try {
-      const response = await axios.get('https://api.pexels.com/v1/search', {
-        params: {
-          query: q.trim(),
-          per_page: 3
-        },
-        headers: {
-          Authorization: process.env.PEXELS_API_KEY
-        },
-        timeout: 8000
-      });
+  try {
+    const cachedImage = await redisClient.get(cacheKey);
+    if (cachedImage) return cachedImage;
 
-      const photo = response.data?.photos?.find((p) => p?.src?.landscape || p?.src?.large || p?.src?.medium || p?.src?.small);
-      if (photo) {
-        const chosen = photo?.src?.landscape || photo?.src?.large || photo?.src?.medium || photo?.src?.small || null;
-        if (chosen) {
-          console.log(`Pexels image for "${label || q}" found via query "${q}"`);
-          return chosen;
+    for (const q of queryList) {
+      try {
+        const response = await axios.get('https://api.pexels.com/v1/search', {
+          params: {
+            query: q.trim(),
+            per_page: 3
+          },
+          headers: {
+            Authorization: process.env.PEXELS_API_KEY
+          },
+          timeout: 8000
+        });
+
+        const photo = response.data?.photos?.find((p) => p?.src?.landscape || p?.src?.large || p?.src?.medium || p?.src?.small);
+        if (photo) {
+          const chosen = photo?.src?.landscape || photo?.src?.large || photo?.src?.medium || photo?.src?.small || null;
+          if (chosen) {
+            console.log(`Pexels image for "${label || q}" found via query "${q}"`);
+            await redisClient.setEx(cacheKey, 86400, chosen);
+            return chosen;
+          }
         }
+      } catch (e) {
+        console.warn(`Pexels query "${q}" failed:`, e.message || e);
       }
-    } catch (e) {
-      console.warn(`Pexels query "${q}" failed:`, e.message || e);
     }
+  } catch (error) {
+    console.error("Pexels Cache Error:", error);
   }
 
   console.warn('Pexels: all query strategies exhausted for', label || queryList[0]);
   return null;
 };
-
 const getWikimediaImage = async (placeName) => {
   if (!placeName) return null;
+
+  const cacheKey = `image:wikimedia:${placeName.toLowerCase().trim().replace(/\s+/g, "_")}`;
+
   try {
+    const cachedImage = await redisClient.get(cacheKey);
+    if (cachedImage) return cachedImage;
+
     const searchResp = await axios.get('https://en.wikipedia.org/w/api.php', {
       params: {
         action: 'query',
@@ -934,16 +1020,18 @@ const getWikimediaImage = async (placeName) => {
     const pages = imageResp.data?.query?.pages || {};
     const firstPage = Object.values(pages)?.[0];
     const img = firstPage?.original?.source || null;
+
     if (img) {
       console.log(`Wikimedia image found for "${placeName}" via "${title}"`);
+      await redisClient.setEx(cacheKey, 86400, img);
     }
+    
     return img;
   } catch (e) {
     console.warn('Wikimedia lookup failed for', placeName, e.message || e);
     return null;
   }
 };
-
 const isProbablyValidUrl = (url) => {
   if (!url || typeof url !== 'string') return false;
   const value = url.trim();
@@ -952,31 +1040,46 @@ const isProbablyValidUrl = (url) => {
   if (value.includes('photo-xxxxx') || value.includes('photo-yyyyy') || value.toLowerCase().includes('placeholder.com')) return false;
   return true;
 };
-
 const isReachableImageUrl = async (url) => {
   if (!isProbablyValidUrl(url)) return false;
+
+  const urlHash = crypto.createHash("md5").update(url).digest("hex");
+  const cacheKey = `url_check:${urlHash}`;
+
   try {
-    const headResp = await axios.head(url, {
-      timeout: 5000,
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400
-    });
-    const contentType = String(headResp.headers?.['content-type'] || '').toLowerCase();
-    return !contentType || contentType.includes('image');
-  } catch (_err) {
+    const cachedStatus = await redisClient.get(cacheKey);
+    if (cachedStatus !== null) return cachedStatus === "true";
+
+    let reachable = false;
     try {
-      const getResp = await axios.get(url, {
+      const headResp = await axios.head(url, {
         timeout: 5000,
         maxRedirects: 5,
-        headers: { Range: 'bytes=0-0' },
-        validateStatus: (status) => status >= 200 && status < 400,
-        responseType: 'arraybuffer'
+        validateStatus: (status) => status >= 200 && status < 400
       });
-      const contentType = String(getResp.headers?.['content-type'] || '').toLowerCase();
-      return !contentType || contentType.includes('image');
-    } catch (_err2) {
-      return false;
+      const contentType = String(headResp.headers?.['content-type'] || '').toLowerCase();
+      reachable = !contentType || contentType.includes('image');
+    } catch (_err) {
+      try {
+        const getResp = await axios.get(url, {
+          timeout: 5000,
+          maxRedirects: 5,
+          headers: { Range: 'bytes=0-0' },
+          validateStatus: (status) => status >= 200 && status < 400,
+          responseType: 'arraybuffer'
+        });
+        const contentType = String(getResp.headers?.['content-type'] || '').toLowerCase();
+        reachable = !contentType || contentType.includes('image');
+      } catch (_err2) {
+        reachable = false;
+      }
     }
+
+    await redisClient.setEx(cacheKey, 43200, String(reachable));
+    return reachable;
+  } catch (error) {
+    console.error("URL Reachability Cache Error:", error);
+    return false;
   }
 };
 
@@ -1145,243 +1248,293 @@ const normalizeDiningVenue = (value = {}) => {
     isOpenNow: Boolean(spot.isOpenNow),
   };
 };
-
 const enrichItineraryWithGoogleVenues = async (rawItineraryData, trip) => {
-  const data = asObject(rawItineraryData) || {};
-  const days = asArray(data.itinerary);
+  const inputHash = crypto
+    .createHash("md5")
+    .update(JSON.stringify({ rawItineraryData, trip }))
+    .digest("hex");
+  const cacheKey = `itinerary:enriched:${inputHash}`;
 
-  const enrichedDays = await Promise.all(days.map(async (day) => {
-    const d = asObject(day) || {};
-    const dayCity = asString(d.city) || asString(d.stay?.area) || trip.destination || trip.origin;
-    const center = await geocodeWithGeoapify(dayCity);
-
-    const currentStay = normalizeStayVenue(d.stay);
-    const currentDining = asArray(d.dining_places).map(normalizeDiningVenue);
-    const currentStayOptions = asArray(d.stay_options).map(normalizeStayVenue);
-
-    if (!center) {
-      return {
-        ...d,
-        stay: currentStay,
-        stay_options: currentStayOptions,
-        dining_places: currentDining,
-      };
+  try {
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
     }
 
-    try {
-      const venueBundle = await fetchGoogleVenueRecommendations({
-        lat: center.lat,
-        lng: center.lng,
-        city: dayCity,
-        budget: trip.budget,
-      });
+    const data = asObject(rawItineraryData) || {};
+    const days = asArray(data.itinerary);
 
-      return {
-        ...d,
-        stay: currentStay.name || currentStay.area || venueBundle.stay?.name
-          ? {
-            ...venueBundle.stay,
-            ...currentStay,
-            name: currentStay.name || venueBundle.stay?.name || '',
-            area: currentStay.area || venueBundle.stay?.area || dayCity,
-            type: currentStay.type || venueBundle.stay?.type || 'hotel',
-            reason: currentStay.reason || venueBundle.stay?.reason || `Recommended stay near ${dayCity}.`,
-            imageUrl: currentStay.imageUrl || venueBundle.stay?.imageUrl || '',
-            rating: currentStay.rating || venueBundle.stay?.rating || 0,
-            price_level: currentStay.price_level || venueBundle.stay?.price_level || 0,
-            googleMapsUrl: currentStay.googleMapsUrl || venueBundle.stay?.googleMapsUrl || '',
-            vicinity: currentStay.vicinity || venueBundle.stay?.vicinity || '',
-            placeId: currentStay.placeId || venueBundle.stay?.placeId || '',
-          }
-          : venueBundle.stay,
-        stay_options: mergeUniqueVenueList(currentStayOptions, venueBundle.stay_options),
-        dining_places: mergeUniqueVenueList(currentDining, venueBundle.dining_places),
-      };
-    } catch (error) {
-      console.warn(`Google venue enrichment failed for ${dayCity}:`, error?.message || error);
-      return {
-        ...d,
-        stay: currentStay,
-        stay_options: currentStayOptions,
-        dining_places: currentDining,
-      };
-    }
-  }));
+    const enrichedDays = await Promise.all(days.map(async (day) => {
+      const d = asObject(day) || {};
+      const dayCity = asString(d.city) || asString(d.stay?.area) || trip.destination || trip.origin;
+      
+      const center = await geocodeWithGeoapify(dayCity);
 
-  return {
-    ...data,
-    itinerary: enrichedDays,
-  };
-};
+      const currentStay = normalizeStayVenue(d.stay);
+      const currentDining = asArray(d.dining_places).map(normalizeDiningVenue);
+      const currentStayOptions = asArray(d.stay_options).map(normalizeStayVenue);
 
-const normalizeItineraryForSave = (rawData) => {
-  const data = asObject(rawData) || {};
-  const days = asArray(data.itinerary).map((day, index) => {
-    const d = asObject(day) || {};
-    const weatherDetailsObj = asObject(d.weather_details) || {};
-
-    const activities = asArray(d.activities).map((activity) => {
-      const a = asObject(activity) || {};
-      return {
-        title: asString(a.title),
-        time: asString(a.time),
-        duration_min: asNumber(a.duration_min, 0),
-        description: asString(a.description),
-        type: asString(a.type),
-        location: asString(a.location)
-      };
-    });
-
-    const food = asArray(d.food).map((meal) => {
-      const f = asObject(meal) || {};
-      return {
-        meal: asString(f.meal),
-        place: asString(f.place),
-        type: asString(f.type)
-      };
-    });
-
-    const dining_places = asArray(d.dining_places).map((spot) => {
-      const s = asObject(spot) || {};
-      return {
-        name: asString(s.name),
-        cuisine: asString(s.cuisine),
-        area: asString(s.area),
-        best_for: asString(s.best_for),
-        imageUrl: asString(s.imageUrl),
-        rating: asNumber(s.rating, 0),
-        price_level: asNumber(s.price_level, 0),
-        googleMapsUrl: asString(s.googleMapsUrl),
-        vicinity: asString(s.vicinity),
-        placeId: asString(s.placeId),
-        distanceKm: asNumber(s.distanceKm, 0),
-        isOpenNow: Boolean(s.isOpenNow),
-      };
-    });
-
-    const stayOptions = asArray(d.stay_options).map((option) => {
-      const s = asObject(option) || {};
-      return {
-        name: asString(s.name),
-        area: asString(s.area),
-        type: asString(s.type),
-        reason: asString(s.reason),
-        imageUrl: asString(s.imageUrl),
-        rating: asNumber(s.rating, 0),
-        price_level: asNumber(s.price_level, 0),
-        googleMapsUrl: asString(s.googleMapsUrl),
-        vicinity: asString(s.vicinity),
-        placeId: asString(s.placeId),
-        distanceKm: asNumber(s.distanceKm, 0),
-      };
-    });
-
-    const travelObj = asObject(d.travel);
-    const stayObj = asObject(d.stay);
-
-    return {
-      day: asNumber(d.day, index + 1),
-      city: asString(d.city),
-      theme: asString(d.theme),
-      weather: asString(d.weather),
-      weather_note: asString(d.weather_note),
-      weather_details: {
-        date: asString(weatherDetailsObj.date),
-        condition: asString(weatherDetailsObj.condition),
-        avg_temp_c: asNumber(weatherDetailsObj.avg_temp_c, null),
-        min_temp_c: asNumber(weatherDetailsObj.min_temp_c, null),
-        max_temp_c: asNumber(weatherDetailsObj.max_temp_c, null),
-        avg_humidity: asNumber(weatherDetailsObj.avg_humidity, null),
-        daily_chance_of_rain: asNumber(weatherDetailsObj.daily_chance_of_rain, null),
-        total_precip_mm: asNumber(weatherDetailsObj.total_precip_mm, null),
-        max_wind_kph: asNumber(weatherDetailsObj.max_wind_kph, null),
-        uv: asNumber(weatherDetailsObj.uv, null),
-        sunrise: asString(weatherDetailsObj.sunrise),
-        sunset: asString(weatherDetailsObj.sunset),
-        alerts_summary: asString(weatherDetailsObj.alerts_summary)
-      },
-      activities,
-      travel: travelObj ? {
-        from: asString(travelObj.from),
-        to: asString(travelObj.to),
-        duration: asString(travelObj.duration),
-        mode: asString(travelObj.mode),
-        note: asString(travelObj.note)
-      } : null,
-      food,
-      dining_places,
-      stay_options: stayOptions,
-      local_explorations: asArray(d.local_explorations).map((item) => asString(item)).filter(Boolean),
-      stay: stayObj ? {
-        area: asString(stayObj.area),
-        type: asString(stayObj.type),
-        reason: asString(stayObj.reason),
-        name: asString(stayObj.name),
-        imageUrl: asString(stayObj.imageUrl),
-        rating: asNumber(stayObj.rating, 0),
-        price_level: asNumber(stayObj.price_level, 0),
-        googleMapsUrl: asString(stayObj.googleMapsUrl),
-        vicinity: asString(stayObj.vicinity),
-        placeId: asString(stayObj.placeId),
-      } : null,
-      tips: asArray(d.tips).map((tip) => asString(tip)).filter(Boolean),
-      summary: asString(d.summary)
-    };
-  });
-
-  return {
-    itinerary: days,
-    total_estimated_cost: asNumber(data.total_estimated_cost ?? data.totalEstimatedCost, 0),
-    packing_tips: asArray(data.packing_tips).map((tip) => asString(tip)).filter(Boolean),
-    best_time_to_visit: asString(data.best_time_to_visit)
-  };
-};
-
-const applyWeatherToItineraryData = ({ normalizedItinerary, weatherByDay = [], groupedPlacesByDay = [] }) => {
-  const next = {
-    ...normalizedItinerary,
-    itinerary: (normalizedItinerary?.itinerary || []).map((day, index) => {
-      const details = weatherByDay[index] || {};
-      const mergedDetails = {
-        date: details.date || day?.weather_details?.date || '',
-        condition: details.condition || day?.weather_details?.condition || '',
-        avg_temp_c: Number.isFinite(details.avg_temp_c) ? details.avg_temp_c : day?.weather_details?.avg_temp_c ?? null,
-        min_temp_c: Number.isFinite(details.min_temp_c) ? details.min_temp_c : day?.weather_details?.min_temp_c ?? null,
-        max_temp_c: Number.isFinite(details.max_temp_c) ? details.max_temp_c : day?.weather_details?.max_temp_c ?? null,
-        avg_humidity: Number.isFinite(details.avg_humidity) ? details.avg_humidity : day?.weather_details?.avg_humidity ?? null,
-        daily_chance_of_rain: Number.isFinite(details.daily_chance_of_rain) ? details.daily_chance_of_rain : day?.weather_details?.daily_chance_of_rain ?? null,
-        total_precip_mm: Number.isFinite(details.total_precip_mm) ? details.total_precip_mm : day?.weather_details?.total_precip_mm ?? null,
-        max_wind_kph: Number.isFinite(details.max_wind_kph) ? details.max_wind_kph : day?.weather_details?.max_wind_kph ?? null,
-        uv: Number.isFinite(details.uv) ? details.uv : day?.weather_details?.uv ?? null,
-        sunrise: details.sunrise || day?.weather_details?.sunrise || '',
-        sunset: details.sunset || day?.weather_details?.sunset || '',
-        alerts_summary: details.alerts_summary || day?.weather_details?.alerts_summary || ''
-      };
-
-      const weatherHeadline = formatWeatherHeadline(mergedDetails);
-      const weatherNote = mergeWeatherNarrative(day.weather_note, mergedDetails);
-
-      const dayPlaces = groupedPlacesByDay[index] || [];
-      const activities = (day.activities || []).map((activity, activityIndex) => {
-        const fallbackPlace = dayPlaces[activityIndex] || dayPlaces[0] || null;
+      if (!center) {
         return {
-          ...activity,
-          description: getGenericPlaceReason(fallbackPlace, activity, day.city || details.city || '')
+          ...d,
+          stay: currentStay,
+          stay_options: currentStayOptions,
+          dining_places: currentDining,
+        };
+      }
+
+      try {
+        // fetchGoogleVenueRecommendations handles its own API caching
+        const venueBundle = await fetchGoogleVenueRecommendations({
+          lat: center.lat,
+          lng: center.lng,
+          city: dayCity,
+          budget: trip.budget,
+        });
+
+        return {
+          ...d,
+          stay: currentStay.name || currentStay.area || venueBundle.stay?.name
+            ? {
+                ...venueBundle.stay,
+                ...currentStay,
+                name: currentStay.name || venueBundle.stay?.name || '',
+                area: currentStay.area || venueBundle.stay?.area || dayCity,
+                type: currentStay.type || venueBundle.stay?.type || 'hotel',
+                reason: currentStay.reason || venueBundle.stay?.reason || `Recommended stay near ${dayCity}.`,
+                imageUrl: currentStay.imageUrl || venueBundle.stay?.imageUrl || '',
+                rating: currentStay.rating || venueBundle.stay?.rating || 0,
+                price_level: currentStay.price_level || venueBundle.stay?.price_level || 0,
+                googleMapsUrl: currentStay.googleMapsUrl || venueBundle.stay?.googleMapsUrl || '',
+                vicinity: currentStay.vicinity || venueBundle.stay?.vicinity || '',
+                placeId: currentStay.placeId || venueBundle.stay?.placeId || '',
+              }
+            : venueBundle.stay,
+          stay_options: mergeUniqueVenueList(currentStayOptions, venueBundle.stay_options),
+          dining_places: mergeUniqueVenueList(currentDining, venueBundle.dining_places),
+        };
+      } catch (error) {
+        console.warn(`Google venue enrichment failed for ${dayCity}:`, error?.message || error);
+        return {
+          ...d,
+          stay: currentStay,
+          stay_options: currentStayOptions,
+          dining_places: currentDining,
+        };
+      }
+    }));
+
+    const finalResult = {
+      ...data,
+      itinerary: enrichedDays,
+    };
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(finalResult));
+
+    return finalResult;
+  } catch (error) {
+    console.error("Enrichment orchestration error:", error.message);
+    return rawItineraryData;
+  }
+};
+
+export default enrichItineraryWithGoogleVenues;
+
+export const normalizeItineraryForSave = async (rawData) => {
+  const inputHash = crypto.createHash("md5").update(JSON.stringify(rawData)).digest("hex");
+  const cacheKey = `itinerary:norm:${inputHash}`;
+
+  try {
+    const cached = await redisClient.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+
+    const data = asObject(rawData) || {};
+    const days = asArray(data.itinerary).map((day, index) => {
+      const d = asObject(day) || {};
+      const weatherDetailsObj = asObject(d.weather_details) || {};
+
+      const activities = asArray(d.activities).map((activity) => {
+        const a = asObject(activity) || {};
+        return {
+          title: asString(a.title),
+          time: asString(a.time),
+          duration_min: asNumber(a.duration_min, 0),
+          description: asString(a.description),
+          type: asString(a.type),
+          location: asString(a.location)
         };
       });
 
-      return {
-        ...day,
-        city: day.city || details.city || '',
-        weather: weatherHeadline,
-        weather_note: weatherNote,
-        weather_details: mergedDetails,
-        activities
-      };
-    })
-  };
+      const food = asArray(d.food).map((meal) => {
+        const f = asObject(meal) || {};
+        return {
+          meal: asString(f.meal),
+          place: asString(f.place),
+          type: asString(f.type)
+        };
+      });
 
-  return next;
+      const dining_places = asArray(d.dining_places).map((spot) => {
+        const s = asObject(spot) || {};
+        return {
+          name: asString(s.name),
+          cuisine: asString(s.cuisine),
+          area: asString(s.area),
+          best_for: asString(s.best_for),
+          imageUrl: asString(s.imageUrl),
+          rating: asNumber(s.rating, 0),
+          price_level: asNumber(s.price_level, 0),
+          googleMapsUrl: asString(s.googleMapsUrl),
+          vicinity: asString(s.vicinity),
+          placeId: asString(s.placeId),
+          distanceKm: asNumber(s.distanceKm, 0),
+          isOpenNow: Boolean(s.isOpenNow),
+        };
+      });
+
+      const stayOptions = asArray(d.stay_options).map((option) => {
+        const s = asObject(option) || {};
+        return {
+          name: asString(s.name),
+          area: asString(s.area),
+          type: asString(s.type),
+          reason: asString(s.reason),
+          imageUrl: asString(s.imageUrl),
+          rating: asNumber(s.rating, 0),
+          price_level: asNumber(s.price_level, 0),
+          googleMapsUrl: asString(s.googleMapsUrl),
+          vicinity: asString(s.vicinity),
+          placeId: asString(s.placeId),
+          distanceKm: asNumber(s.distanceKm, 0),
+        };
+      });
+
+      const travelObj = asObject(d.travel);
+      const stayObj = asObject(d.stay);
+
+      return {
+        day: asNumber(d.day, index + 1),
+        city: asString(d.city),
+        theme: asString(d.theme),
+        weather: asString(d.weather),
+        weather_note: asString(d.weather_note),
+        weather_details: {
+          date: asString(weatherDetailsObj.date),
+          condition: asString(weatherDetailsObj.condition),
+          avg_temp_c: asNumber(weatherDetailsObj.avg_temp_c, null),
+          min_temp_c: asNumber(weatherDetailsObj.min_temp_c, null),
+          max_temp_c: asNumber(weatherDetailsObj.max_temp_c, null),
+          avg_humidity: asNumber(weatherDetailsObj.avg_humidity, null),
+          daily_chance_of_rain: asNumber(weatherDetailsObj.daily_chance_of_rain, null),
+          total_precip_mm: asNumber(weatherDetailsObj.total_precip_mm, null),
+          max_wind_kph: asNumber(weatherDetailsObj.max_wind_kph, null),
+          uv: asNumber(weatherDetailsObj.uv, null),
+          sunrise: asString(weatherDetailsObj.sunrise),
+          sunset: asString(weatherDetailsObj.sunset),
+          alerts_summary: asString(weatherDetailsObj.alerts_summary)
+        },
+        activities,
+        travel: travelObj ? {
+          from: asString(travelObj.from),
+          to: asString(travelObj.to),
+          duration: asString(travelObj.duration),
+          mode: asString(travelObj.mode),
+          note: asString(travelObj.note)
+        } : null,
+        food,
+        dining_places,
+        stay_options: stayOptions,
+        local_explorations: asArray(d.local_explorations).map((item) => asString(item)).filter(Boolean),
+        stay: stayObj ? {
+          area: asString(stayObj.area),
+          type: asString(stayObj.type),
+          reason: asString(stayObj.reason),
+          name: asString(stayObj.name),
+          imageUrl: asString(stayObj.imageUrl),
+          rating: asNumber(stayObj.rating, 0),
+          price_level: asNumber(stayObj.price_level, 0),
+          googleMapsUrl: asString(stayObj.googleMapsUrl),
+          vicinity: asString(stayObj.vicinity),
+          placeId: asString(stayObj.placeId),
+        } : null,
+        tips: asArray(d.tips).map((tip) => asString(tip)).filter(Boolean),
+        summary: asString(d.summary)
+      };
+    });
+
+    const result = {
+      itinerary: days,
+      total_estimated_cost: asNumber(data.total_estimated_cost ?? data.totalEstimatedCost, 0),
+      packing_tips: asArray(data.packing_tips).map((tip) => asString(tip)).filter(Boolean),
+      best_time_to_visit: asString(data.best_time_to_visit)
+    };
+
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(result));
+    return result;
+  } catch (error) {
+    console.error("Normalization cache error:", error);
+    return rawData;
+  }
+};
+export const applyWeatherToItineraryData = async ({ normalizedItinerary, weatherByDay = [], groupedPlacesByDay = [] }) => {
+  const inputHash = crypto
+    .createHash("md5")
+    .update(JSON.stringify({ normalizedItinerary, weatherByDay, groupedPlacesByDay }))
+    .digest("hex");
+  const cacheKey = `itinerary:weathered:${inputHash}`;
+
+  try {
+    const cached = await redisClient.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+
+    const next = {
+      ...normalizedItinerary,
+      itinerary: (normalizedItinerary?.itinerary || []).map((day, index) => {
+        const details = weatherByDay[index] || {};
+        const mergedDetails = {
+          date: details.date || day?.weather_details?.date || '',
+          condition: details.condition || day?.weather_details?.condition || '',
+          avg_temp_c: Number.isFinite(details.avg_temp_c) ? details.avg_temp_c : day?.weather_details?.avg_temp_c ?? null,
+          min_temp_c: Number.isFinite(details.min_temp_c) ? details.min_temp_c : day?.weather_details?.min_temp_c ?? null,
+          max_temp_c: Number.isFinite(details.max_temp_c) ? details.max_temp_c : day?.weather_details?.max_temp_c ?? null,
+          avg_humidity: Number.isFinite(details.avg_humidity) ? details.avg_humidity : day?.weather_details?.avg_humidity ?? null,
+          daily_chance_of_rain: Number.isFinite(details.daily_chance_of_rain) ? details.daily_chance_of_rain : day?.weather_details?.daily_chance_of_rain ?? null,
+          total_precip_mm: Number.isFinite(details.total_precip_mm) ? details.total_precip_mm : day?.weather_details?.total_precip_mm ?? null,
+          max_wind_kph: Number.isFinite(details.max_wind_kph) ? details.max_wind_kph : day?.weather_details?.max_wind_kph ?? null,
+          uv: Number.isFinite(details.uv) ? details.uv : day?.weather_details?.uv ?? null,
+          sunrise: details.sunrise || day?.weather_details?.sunrise || '',
+          sunset: details.sunset || day?.weather_details?.sunset || '',
+          alerts_summary: details.alerts_summary || day?.weather_details?.alerts_summary || ''
+        };
+
+        const weatherHeadline = formatWeatherHeadline(mergedDetails);
+        const weatherNote = mergeWeatherNarrative(day.weather_note, mergedDetails);
+
+        const dayPlaces = groupedPlacesByDay[index] || [];
+        const activities = (day.activities || []).map((activity, activityIndex) => {
+          const fallbackPlace = dayPlaces[activityIndex] || dayPlaces[0] || null;
+          return {
+            ...activity,
+            description: getGenericPlaceReason(fallbackPlace, activity, day.city || details.city || '')
+          };
+        });
+
+        return {
+          ...day,
+          city: day.city || details.city || '',
+          weather: weatherHeadline,
+          weather_note: weatherNote,
+          weather_details: mergedDetails,
+          activities
+        };
+      })
+    };
+
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(next));
+    return next;
+  } catch (error) {
+    console.error("Weather application cache error:", error);
+    return normalizedItinerary;
+  }
 };
 
 const realignItineraryToPlannedDays = ({ normalizedItinerary, groupedPlacesByDay = [], destination = '' }) => {
@@ -1726,13 +1879,11 @@ const generatePlaces = asyncHandler(async (req, res) => {
       if (url && !(await isReachableImageUrl(url))) url = '';
     }
 
-    // If Unsplash fails, try Pexels
     if (!isProbablyValidUrl(url)) {
       url = await getPexelsImage(queryVariants, place.name);
       if (url && !(await isReachableImageUrl(url))) url = '';
     }
 
-    // Free and strong for popular landmarks if photo stock APIs miss.
     if (!isProbablyValidUrl(url)) {
       url = await getWikimediaImage(place.name);
       if (url && !(await isReachableImageUrl(url))) url = '';
@@ -1754,7 +1905,6 @@ const generatePlaces = asyncHandler(async (req, res) => {
   return res.json({ success: true, places: placesWithImages });
 });
 
-// Update selected places
 const selectPlaces = asyncHandler(async (req, res) => {
   const { tripId } = req.params;
   const { selectedPlaces } = req.body;
