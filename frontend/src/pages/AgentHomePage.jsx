@@ -1030,10 +1030,18 @@ export default function AgentHomePage() {
             <h1 className="mt-1 text-xl font-semibold tracking-tight text-slate-100 md:text-3xl">Operation Round Table</h1>
             <p className="mt-1 max-w-3xl text-sm leading-relaxed text-slate-400">Align route strategy, checkpoints, and approvals from one control desk before final mission lock.</p>
           </div>
-          <button type="button" onClick={handleLogout}
-            className="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/80">
-            Sign out
-          </button>
+          <div className="flex items-center gap-2">
+            <Link
+              to="/history"
+              className="rounded-lg border border-blue-400/30 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-200 transition hover:border-blue-300 hover:bg-blue-500/20"
+            >
+              History
+            </Link>
+            <button type="button" onClick={handleLogout}
+              className="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800/80">
+              Sign out
+            </button>
+          </div>
         </div>
       </header>
 

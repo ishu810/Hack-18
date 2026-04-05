@@ -98,3 +98,27 @@ export async function fetchBudgetEstimate(tripId, payload = {}) {
     ...(hasPayload ? { body: JSON.stringify(payload) } : {}),
   });
 }
+
+export function getTravelHistory() {
+  return apiRequest('/api/history', {
+    method: 'GET',
+  });
+}
+
+export function getTravelHistoryByStatus(status) {
+  return apiRequest(`/api/history/status/${encodeURIComponent(status)}`, {
+    method: 'GET',
+  });
+}
+
+export function getTravelHistoryById(travelId) {
+  return apiRequest(`/api/history/${encodeURIComponent(travelId)}`, {
+    method: 'GET',
+  });
+}
+
+export function getTravelHistoryItinerary(travelId) {
+  return apiRequest(`/api/history/${encodeURIComponent(travelId)}/itinerary`, {
+    method: 'GET',
+  });
+}

@@ -2,6 +2,7 @@ import { AnimatePresence } from 'framer-motion';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import AgentHomePage from './pages/AgentHomePage';
+import History from './pages/History';
 import ItineraryPlannerPage from './pages/ItineraryPlannerPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -49,6 +50,8 @@ export default function App() {
         <Route path="/agent-home" element={<Protected><AgentHomePage /></Protected>} />
         <Route path="/itinerary-planner" element={<Protected><ItineraryPlannerPage /></Protected>} />
         <Route path="/travel-alerts" element={<Protected><TravelAlerts /></Protected>} />
+        <Route path="/history" element={<Protected><History /></Protected>} />
+        <Route path="/history/:id" element={<Protected><History /></Protected>} />
         <Route path="/weather-dashboard" element={<Protected><WeatherDashboard /></Protected>} />
         <Route path="*" element={<Navigate to={user ? '/agent-home' : '/login'} replace />} />
       </Routes>
