@@ -365,7 +365,6 @@ export default function AgentHomePage() {
   const [history, setHistory] = useState([]);
   const [error, setError] = useState('');
 
-  // Doc-3 API state
   const [checkpointPlaces, setCheckpointPlaces] = useState({});
   const [placesLoading, setPlacesLoading] = useState(false);
   const [placesError, setPlacesError] = useState('');
@@ -374,7 +373,6 @@ export default function AgentHomePage() {
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
 
-  // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
   const [dragRouteIndex, setDragRouteIndex] = useState(null);
   const [previewStop, setPreviewStop] = useState(null);

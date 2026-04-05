@@ -5,7 +5,9 @@ import { buildItineraryPrompt } from '../utils/itineraryPrompt.js';
 import { computeRoute as computeRouteService } from '../services/routing/routing.service.js';
 import { fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
 import axios from 'axios';
-
+import redisClient from "../configs/redisClient.js"; 
+const CACHE_TTL = 3600; 
+const WEATHER_CACHE_TTL = 10800; 
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
 const GEOAPIFY_BASE_URL = 'https://api.geoapify.com';
 
