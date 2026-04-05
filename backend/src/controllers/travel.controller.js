@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { buildItineraryPrompt } from '../utils/itineraryPrompt.js';
 import { computeRoute as computeRouteService } from '../services/routing/routing.service.js';
-import { fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
+import { fetchGoogleCheckpointCandidates, fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
 import axios from 'axios';
 
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
@@ -835,6 +835,10 @@ const buildQueryVariants = (placeName, location, type) => {
 const getUnsplashImage = async (queries, label) => {
   if (!process.env.UNSPLASH_ACCESS_KEY) return null;
 
+  if (globalThis.__unsplashBlockedUntil && Date.now() < globalThis.__unsplashBlockedUntil) {
+    return null;
+  }
+
   const queryList = Array.isArray(queries) ? queries : [queries];
 
   for (const q of queryList) {
@@ -859,6 +863,16 @@ const getUnsplashImage = async (queries, label) => {
         }
       }
     } catch (e) {
+      const status = e?.response?.status || 0;
+      if (status === 403) {
+        const message = String(e?.response?.data || e?.message || 'Forbidden');
+        if (/rate limit/i.test(message)) {
+          // Stop retry storm when Unsplash quota is exhausted; rely on Pexels/Wikimedia fallback.
+          globalThis.__unsplashBlockedUntil = Date.now() + (60 * 60 * 1000);
+          console.warn('Unsplash rate limit exceeded. Temporarily disabling Unsplash lookups for 60 minutes.');
+          return null;
+        }
+      }
       console.warn(`Unsplash query "${q}" failed:`, e.message || e);
     }
   }
@@ -951,8 +965,18 @@ const isProbablyValidUrl = (url) => {
   return true;
 };
 
+const isGooglePlacesPhotoMediaUrl = (url) => {
+  if (!isProbablyValidUrl(url)) return false;
+  return /^https:\/\/places\.googleapis\.com\/v1\/places\/[^/]+\/photos\/[^/]+\/media\?/i.test(String(url).trim());
+};
+
 const isReachableImageUrl = async (url) => {
   if (!isProbablyValidUrl(url)) return false;
+  if (isGooglePlacesPhotoMediaUrl(url)) {
+    // Google Places photo media links may reject backend HEAD/Range probes depending on key restrictions.
+    // Do not discard them here; let client-side image loading handle final fetchability.
+    return true;
+  }
   try {
     const headResp = await axios.head(url, {
       timeout: 5000,
@@ -1030,17 +1054,45 @@ const extractFirstJsonObject = (text = '') => {
   return end > start ? source.slice(start, end + 1).trim() : '';
 };
 
+const tryParseJsonWithHeuristics = (text = '') => {
+  const source = String(text || '').trim();
+  if (!source) return null;
+
+  const variants = new Set([source]);
+
+  // Remove trailing commas before closing braces/brackets.
+  variants.add(source.replace(/,\s*([}\]])/g, '$1'));
+
+  // Strip BOM/control chars that occasionally sneak into model output.
+  variants.add(source.replace(/^\uFEFF/, '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ''));
+
+  // Apply both sanitizations together.
+  variants.add(
+    source
+      .replace(/^\uFEFF/, '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/,\s*([}\]])/g, '$1')
+  );
+
+  for (const candidate of variants) {
+    try {
+      return JSON.parse(candidate);
+    } catch (_err) {
+      // Try next candidate.
+    }
+  }
+
+  return null;
+};
+
 const parseItineraryJsonSafely = async (rawContent = '') => {
   const cleaned = stripCodeFences(rawContent);
   const extracted = extractFirstJsonObject(cleaned);
   const candidates = [cleaned, extracted].filter(Boolean);
 
   for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch (_err) {
-      // Try next candidate.
-    }
+    const parsed = tryParseJsonWithHeuristics(candidate);
+    if (parsed) return parsed;
   }
 
   const repairPrompt = `You are a JSON repair tool. Convert the following content into ONE valid JSON object only. Return strict JSON with no markdown fences, comments, or extra text.\n\n${cleaned}`;
@@ -1049,6 +1101,19 @@ const parseItineraryJsonSafely = async (rawContent = '') => {
   const repairedClean = stripCodeFences(repairedRaw);
   const repairedExtracted = extractFirstJsonObject(repairedClean);
   const repairedCandidate = repairedExtracted || repairedClean;
+
+  const repairedParsed = tryParseJsonWithHeuristics(repairedCandidate);
+  if (repairedParsed) return repairedParsed;
+
+  const strictRepairPrompt = `Fix this malformed JSON and return ONLY strict valid JSON object. Keep all keys and values, do not add explanation.\n\nMalformed JSON:\n${repairedCandidate}`;
+  const strictRepairResponse = await llm.invoke(strictRepairPrompt);
+  const strictRaw = String(strictRepairResponse?.content || strictRepairResponse?.text || '').trim();
+  const strictClean = stripCodeFences(strictRaw);
+  const strictExtracted = extractFirstJsonObject(strictClean);
+  const strictCandidate = strictExtracted || strictClean;
+
+  const strictParsed = tryParseJsonWithHeuristics(strictCandidate);
+  if (strictParsed) return strictParsed;
 
   return JSON.parse(repairedCandidate);
 };
@@ -1528,17 +1593,17 @@ const createTrip = asyncHandler(async (req, res) => {
   });
 });
 
-// Generate candidate places using Geoapify + LLM selection
+// Generate candidate places using Google Places (primary) + Geoapify fallback + LLM selection
 const generatePlaces = asyncHandler(async (req, res) => {
   const { tripId } = req.params;
   console.log('DEBUG generatePlaces called for tripId', tripId);
-  console.log('[Geoapify] runtime key fingerprint:', maskKey(getGeoapifyKey()));
+  console.log('[Providers] Geoapify key fingerprint:', maskKey(getGeoapifyKey()));
   const trip = await Travel.findById(tripId);
   if (!trip) return res.status(404).json({ success: false, message: 'Trip not found' });
   const days = getTripDaysFromDates(trip.dates);
   const checkpointNames = [...new Set([...(trip.stops || []), trip.destination].map((name) => String(name || '').trim()).filter(Boolean))];
 
-  console.log('[Geoapify] checkpoints for discovery:', checkpointNames);
+  console.log('[Places] checkpoints for discovery:', checkpointNames);
 
   const discoveredByCheckpoint = await Promise.all(
     checkpointNames.map(async (checkpointName) => {
@@ -1555,7 +1620,35 @@ const generatePlaces = asyncHandler(async (req, res) => {
           name: center.name,
         });
 
-        const fetchedPlaces = await fetchGeoapifyPlaces({ lat: center.lat, lng: center.lng, radius: 70000 });
+        let fetchedPlaces = [];
+
+        try {
+          const googleCandidates = await fetchGoogleCheckpointCandidates({
+            lat: center.lat,
+            lng: center.lng,
+            checkpointName,
+          });
+
+          if (googleCandidates.length) {
+            console.log(`[GooglePlaces] raw places for ${checkpointName}: count=${googleCandidates.length}`);
+            fetchedPlaces = googleCandidates.map((place) => ({
+              name: place.name,
+              lat: place.lat,
+              lng: place.lng,
+              rating: place.rating,
+              popularity: place.popularity,
+              category: place.type || 'attraction',
+              imageUrl: place.imageUrl || '',
+            }));
+          }
+        } catch (googleError) {
+          console.warn(`[GooglePlaces] fetch failed for ${checkpointName}:`, googleError?.message || googleError);
+        }
+
+        if (!fetchedPlaces.length) {
+          fetchedPlaces = await fetchGeoapifyPlaces({ lat: center.lat, lng: center.lng, radius: 70000 });
+          console.log(`[Geoapify] fallback places for ${checkpointName}: count=${fetchedPlaces.length}`);
+        }
 
         console.log(`[Geoapify] raw places for ${checkpointName}: count=${fetchedPlaces.length}`);
         if (fetchedPlaces.length) {
@@ -1579,7 +1672,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
             type: place.category || 'attraction',
             location: checkpointName,
             best_visit_reason: '',
-            imageUrl: ''
+            imageUrl: place.imageUrl || ''
           }));
       } catch (error) {
         console.warn(`Geoapify fetch failed for ${checkpointName}:`, {
@@ -1615,7 +1708,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
   if (!discoveredUnique.length) {
     return res.status(502).json({
       success: false,
-      message: 'No places were discovered for this route. Check GEOAPIFY_API_KEY and destination input.'
+      message: 'No places were discovered for this route. Check GOOGLE_PLACES_API_KEY (or fallback GEOAPIFY_API_KEY) and destination input.'
     });
   }
 
@@ -1660,7 +1753,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
           popularity: popularity ?? matchingCandidate?.popularity ?? null,
           type: (item.type || matchingCandidate?.type || 'attraction').toString(),
           best_visit_reason: (item.best_visit_reason || item.bestVisitReason || item.why_visit || '').toString().trim() || `Popular and high-value stop near ${matchingCandidate?.location || location}.`,
-          imageUrl: ''
+          imageUrl: matchingCandidate?.imageUrl || ''
         };
       })
       .filter((item) => item && item.name && Number.isFinite(item.lat) && Number.isFinite(item.lng));
@@ -1718,7 +1811,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
 
     const queryVariants = buildQueryVariants(place.name, place.location, place.type);
     
-    // Try Unsplash first
+    // Google-sourced imageUrl is already preferred above; try Unsplash only when missing.
     if (!isProbablyValidUrl(url)) {
       url = await getUnsplashImage(queryVariants, place.name);
       if (url && !(await isReachableImageUrl(url))) url = '';

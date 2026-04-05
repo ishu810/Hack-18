@@ -123,10 +123,12 @@ async function googleNearbySearch({ lat, lng, radius = DEFAULT_RADIUS_METERS, ty
   const apiKey = getGooglePlacesKey();
   if (!apiKey || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
 
+  const boundedRadius = Math.max(1000, Math.min(50000, Math.round(Number(radius) || DEFAULT_RADIUS_METERS)));
+
   const cacheKey = JSON.stringify({
     lat: Number(lat.toFixed(4)),
     lng: Number(lng.toFixed(4)),
-    radius,
+    radius: boundedRadius,
     type,
     keyword,
     maxResults,
@@ -163,7 +165,7 @@ async function googleNearbySearch({ lat, lng, radius = DEFAULT_RADIUS_METERS, ty
           latitude: lat,
           longitude: lng,
         },
-        radius: Math.max(1000, Math.round(radius)),
+        radius: boundedRadius,
       },
     },
   };
@@ -204,6 +206,8 @@ async function googleNearbySearch({ lat, lng, radius = DEFAULT_RADIUS_METERS, ty
       return {
         name: String(displayName).trim(),
         placeId: place.id || '',
+        lat: placeLat,
+        lng: placeLng,
         type: pickPrimaryType(placeTypes, type),
         rating: toFiniteNumber(place.rating),
         user_ratings_total: toFiniteNumber(place.userRatingCount) || 0,
@@ -236,6 +240,63 @@ function dedupePlaces(places = []) {
     seen.add(key);
     return true;
   });
+}
+
+function scoreAttraction(place = {}) {
+  const rating = Number(place.rating) || 0;
+  const reviews = Number(place.user_ratings_total) || 0;
+  const distance = Number(place.distanceKm) || 0;
+  const typeBoost = String(place.type || '').includes('tourist_attraction') ? 2.5 : 0;
+  return (rating * 16) + (Math.log10(reviews + 1) * 12) + (Math.max(0, 20 - distance) * 0.8) + typeBoost;
+}
+
+export async function fetchGoogleCheckpointCandidates({ lat, lng, checkpointName = '' }) {
+  const key = getGooglePlacesKey();
+  if (!key || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+
+  const radius = Math.max(
+    1000,
+    Math.min(50000, Number(process.env.GOOGLE_CHECKPOINT_SEARCH_RADIUS_METERS || 45000))
+  );
+  const cityHint = String(checkpointName || '').trim();
+
+  const searches = [
+    googleNearbySearch({ lat, lng, radius, type: 'tourist_attraction', keyword: `${cityHint} famous places`.trim(), maxResults: 15, venueKind: 'dining', budget: 0 }),
+    googleNearbySearch({ lat, lng, radius, type: 'museum', keyword: `${cityHint} heritage`.trim(), maxResults: 10, venueKind: 'dining', budget: 0 }),
+    googleNearbySearch({ lat, lng, radius, type: 'hindu_temple', keyword: `${cityHint} temple`.trim(), maxResults: 10, venueKind: 'dining', budget: 0 }),
+    googleNearbySearch({ lat, lng, radius, type: 'park', keyword: `${cityHint} park landmark`.trim(), maxResults: 8, venueKind: 'dining', budget: 0 }),
+  ];
+
+  const settled = await Promise.allSettled(searches);
+  const rejected = settled.filter((item) => item.status === 'rejected');
+  if (rejected.length) {
+    console.warn(
+      `[GooglePlaces] ${cityHint || 'checkpoint'} had ${rejected.length} failed search(es):`,
+      rejected.map((item) => item.reason?.message || String(item.reason))
+    );
+  }
+
+  const merged = settled
+    .filter((item) => item.status === 'fulfilled')
+    .flatMap((item) => item.value || []);
+
+  return dedupePlaces(merged)
+    .sort((a, b) => scoreAttraction(b) - scoreAttraction(a))
+    .slice(0, 28)
+    .map((place) => ({
+      name: place.name,
+      lat: Number.isFinite(Number(place.lat)) ? Number(place.lat) : lat,
+      lng: Number.isFinite(Number(place.lng)) ? Number(place.lng) : lng,
+      rating: Number.isFinite(Number(place.rating)) ? Number(place.rating) : 0,
+      popularity: Number.isFinite(Number(place.user_ratings_total))
+        ? Math.round(Math.log10(Number(place.user_ratings_total) + 1) * 28)
+        : 0,
+      type: place.type || 'attraction',
+      vicinity: place.vicinity || cityHint,
+      googleMapsUrl: place.googleMapsUrl || '',
+      imageUrl: place.imageUrl || '',
+      distanceKm: Number.isFinite(Number(place.distanceKm)) ? Number(place.distanceKm) : null,
+    }));
 }
 
 export async function fetchGoogleVenueRecommendations({ lat, lng, city = '', budget = 0 }) {

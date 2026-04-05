@@ -1,16 +1,6 @@
 import React, { useState } from 'react';
 import { Plane, Hotel, Navigation, ChevronDown, ChevronUp, X, ExternalLink, AlertCircle, CloudSun } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-
-// Fix for default leaflet marker icons
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-});
+import PlacesMap from '../components/GooglePlacesMap';
 
 const TravelAlerts = () => {
   const [openLeg, setOpenLeg] = useState(1);
@@ -100,30 +90,15 @@ const TravelAlerts = () => {
 
       <div className="grid grid-cols-12 gap-6 flex-grow overflow-hidden">
         
-        {/* LEFT: LEAFLET MAP (SEA BLUE COLOR) */}
+        {/* LEFT: GOOGLE MAP (SEA BLUE COLOR) */}
         <div className="col-span-12 lg:col-span-3 bg-[#0f172a] rounded-xl border border-slate-800 overflow-hidden relative">
-          <MapContainer 
-            center={[45, 70]} 
-            zoom={2} 
-            scrollWheelZoom={true}
-            className="h-full w-full z-10 custom-sea-blue-filter"
-          >
-            <TileLayer
-              attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
-              url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-            />
-            <Polyline 
-              positions={routePath} 
-              pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }} 
-            />
-            {bookingCards.map((card) => (
-              <Marker 
-                key={card.id} 
-                position={card.coords}
-                eventHandlers={{ click: () => setSelectedCity(card) }}
-              />
-            ))}
-          </MapContainer>
+          <PlacesMap
+            places={bookingCards.map((card) => ({ name: card.cityName, lat: card.coords[0], lng: card.coords[1] }))}
+            routePlaces={bookingCards.map((card) => ({ name: card.cityName, lat: card.coords[0], lng: card.coords[1] }))}
+            className="h-full min-h-[28rem]"
+            showRoute
+            onMarkerClick={(name) => setSelectedCity(bookingCards.find((card) => card.cityName === name) || null)}
+          />
           <div className="absolute bottom-4 left-4 z-20 bg-black/60 backdrop-blur-md p-2 px-4 rounded border border-white/10 text-[9px] font-mono text-cyan-400">
             Sector_Sea_View
           </div>
@@ -201,8 +176,6 @@ const TravelAlerts = () => {
         .custom-sea-blue-filter { 
           filter: hue-rotate(170deg) saturate(1.8) brightness(0.9) contrast(1.1) !important;
         }
-        
-        .leaflet-container { background: #070a0d !important; }
       `}</style>
     </div>
   );

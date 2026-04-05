@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { computeRoute, fetchBudgetEstimate } from '../api';
 import BudgetBreakdown from '../components/BudgetBreakdown';
-import PlacesMap from '../components/PlacesMap';
+import PlacesMap from '../components/GooglePlacesMap';
 import { optimizeDayPlaces } from '../utils/dayRouteOptimizer';
 import { buildRouteMetrics, formatDistance } from '../utils/routeMath';
 

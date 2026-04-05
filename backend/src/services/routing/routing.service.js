@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { TTLCache } from '../../utils/ttlCache.js';
+import { computeRouteWithGoogleDirections } from './providers/googleRoutingAdapter.js';
 import { computeRouteWithGeoapify } from './providers/geoapifyRoutingAdapter.js';
 
 const routeCache = new TTLCache({ ttlMs: 5 * 60 * 1000, maxEntries: 800 });
@@ -42,20 +43,24 @@ function buildRouteHash({ waypoints, mode = 'drive', provider = 'geoapify' }) {
 }
 
 function getProviderName() {
-  const candidate = String(process.env.ROUTING_PROVIDER || 'geoapify').toLowerCase().trim();
-  if (candidate === 'google') return 'google';
-  return 'geoapify';
+  const candidate = String(process.env.ROUTING_PROVIDER || '').toLowerCase().trim();
+  if (candidate === 'google' || candidate === 'geoapify') return candidate;
+
+  const hasGoogleKey = Boolean(
+    String(
+      process.env.GOOGLE_DIRECTIONS_API_KEY
+      || process.env.GOOGLE_MAPS_API_KEY
+      || process.env.GOOGLE_API_KEY
+      || '',
+    ).trim(),
+  );
+
+  return hasGoogleKey ? 'google' : 'geoapify';
 }
 
 async function runProvider(provider, payload) {
   if (provider === 'google') {
-    return {
-      ok: false,
-      error: {
-        code: 'PROVIDER_NOT_CONFIGURED',
-        message: 'Google routing provider is not configured in this build.',
-      },
-    };
+    return computeRouteWithGoogleDirections(payload);
   }
 
   return computeRouteWithGeoapify(payload);

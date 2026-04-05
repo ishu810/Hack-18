@@ -1,18 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 import { createTrip, generateItinerary, generatePlaces, getFlightCost, logoutUser, selectPlaces } from '../api';
-import PlacesMap from '../components/PlacesMap';
-
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-});
+import PlacesMap from '../components/GooglePlacesMap';
+import { formatDistance } from '../utils/routeMath';
 
 const MotionSection = motion.section;
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
@@ -68,6 +59,7 @@ async function fetchWikipediaPhoto(locationName, searchHint = '') {
     for (const query of buildQueries(simpleName, hintName)) {
       // 1. Try direct page summary
       const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
+      if (!res.ok) continue;
       const data = await res.json();
       if (data.thumbnail?.source) return data.thumbnail.source;
     }
@@ -84,6 +76,7 @@ async function fetchWikipediaPhoto(locationName, searchHint = '') {
       const finalRes = await fetch(
         `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`
       );
+      if (!finalRes.ok) continue;
       const finalData = await finalRes.json();
       if (finalData.thumbnail?.source) return finalData.thumbnail.source;
     }
@@ -324,6 +317,22 @@ function summarizeOrderedRoute(route) {
   };
 }
 
+function normalizeGoogleRouteMetrics(metrics = {}) {
+  const distanceKm = Number(metrics?.distanceKm ?? metrics?.totalDistance ?? 0);
+  const durationMinutes = Number(metrics?.durationMinutes ?? metrics?.estimatedMinutes ?? 0);
+  const hasRealRouteMetrics = Number.isFinite(Number(metrics?.distanceMeters)) || Number.isFinite(Number(metrics?.durationSeconds));
+
+  return {
+    totalDistance: Number.isFinite(distanceKm) && distanceKm > 0 ? Math.round(distanceKm * 10) / 10 : 0,
+    estimatedHours: Number.isFinite(durationMinutes) && durationMinutes > 0 ? Math.round((durationMinutes / 60) * 10) / 10 : 0,
+    routeMetrics: hasRealRouteMetrics ? {
+      ...metrics,
+      distanceKm: Number.isFinite(distanceKm) ? distanceKm : 0,
+      durationMinutes: Number.isFinite(durationMinutes) ? durationMinutes : 0,
+    } : null,
+  };
+}
+
 function findBestRoute(origin, destination, stops) {
   const rem = [...stops], ordered = [origin];
   let current = origin, total = 0;
@@ -451,6 +460,11 @@ export default function AgentHomePage() {
       Object.entries(prev || {}).forEach(([key, value]) => {
         if (activeKeys.has(key)) next[key] = value;
       });
+      const prevKeys = Object.keys(prev || {});
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => next[key] === prev[key])) {
+        return prev;
+      }
       return next;
     });
     setFlightFares((prev) => {
@@ -458,6 +472,11 @@ export default function AgentHomePage() {
       Object.entries(prev || {}).forEach(([key, value]) => {
         if (activeKeys.has(key)) next[key] = value;
       });
+      const prevKeys = Object.keys(prev || {});
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => next[key] === prev[key])) {
+        return prev;
+      }
       return next;
     });
   }, [routeSegments]);
@@ -513,7 +532,7 @@ export default function AgentHomePage() {
           }));
         });
     });
-  }, [currentStep, routeSegments, flightFares]);
+  }, [currentStep, routeSegments]);
 
   const getSegmentSelection = (segmentKey) => {
     const saved = segmentModes?.[segmentKey];
@@ -661,6 +680,43 @@ export default function AgentHomePage() {
     .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
+
+  const applyGoogleRouteMetrics = useCallback((metrics) => {
+    if (!metrics) return;
+
+    const normalized = normalizeGoogleRouteMetrics(metrics);
+    if (!normalized.routeMetrics) return;
+
+    setResult((prev) => {
+      if (!prev) return prev;
+
+      const prevMetrics = prev.routeMetrics || {};
+      const sameDistance = Number(prevMetrics.distanceMeters) === Number(normalized.routeMetrics.distanceMeters);
+      const sameDuration = Number(prevMetrics.durationSeconds) === Number(normalized.routeMetrics.durationSeconds);
+      if (sameDistance && sameDuration) return prev;
+
+      return {
+        ...prev,
+        totalDistance: normalized.totalDistance,
+        estimatedHours: normalized.estimatedHours,
+        routeMetrics: normalized.routeMetrics,
+      };
+    });
+  }, []);
+
+  const displayDistanceText = useMemo(() => {
+    if (result?.routeMetrics?.distanceMeters) {
+      return `${formatDistance(result.routeMetrics.distanceMeters, 1)}`;
+    }
+    return `${Number(result?.totalDistance || 0).toFixed(0)} km`;
+  }, [result]);
+
+  const displayTimeText = useMemo(() => {
+    if (result?.routeMetrics?.durationMinutes) {
+      return `${(Number(result.routeMetrics.durationMinutes) / 60).toFixed(1)} hrs`;
+    }
+    return `${Number(result?.estimatedHours || 0).toFixed(1)} hrs`;
+  }, [result]);
 
   const commitRouteChange = (nextRoute) => {
     const next = Array.isArray(nextRoute) ? nextRoute : [];
@@ -1024,8 +1080,8 @@ export default function AgentHomePage() {
                       className="w-full rounded-xl border border-slate-600 bg-slate-950/75 px-4 py-3 text-base font-medium text-slate-100 outline-none transition focus:border-amber-300/70 focus:ring-2 focus:ring-amber-300/30" />
                     {originInput && originSuggestions.length > 0 && !originSuggestions.some((p) => p.name === originInput) && (
                       <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
-                        {originSuggestions.map((place) => (
-                          <button key={place.name} type="button" onMouseDown={() => { setOrigin(place); setOriginInput(place.name); }}
+                        {originSuggestions.map((place, idx) => (
+                          <button key={`${place.name}-${place.lat}-${place.lng}-${idx}`} type="button" onMouseDown={() => { setOrigin(place); setOriginInput(place.name); }}
                             className="block w-full border-b border-slate-800 px-4 py-3 text-left transition hover:bg-slate-800/80">
                             <p className="text-sm text-slate-100">{place.name}</p>
                             <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
@@ -1044,8 +1100,8 @@ export default function AgentHomePage() {
                       className="w-full rounded-xl border border-slate-600 bg-slate-950/75 px-4 py-3 text-base font-medium text-slate-100 outline-none transition focus:border-amber-300/70 focus:ring-2 focus:ring-amber-300/30" />
                     {destinationInput && destinationSuggestions.length > 0 && !destinationSuggestions.some((p) => p.name === destinationInput) && (
                       <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
-                        {destinationSuggestions.map((place) => (
-                          <button key={place.name} type="button" onMouseDown={() => { setDestination(place); setDestinationInput(place.name); }}
+                        {destinationSuggestions.map((place, idx) => (
+                          <button key={`${place.name}-${place.lat}-${place.lng}-${idx}`} type="button" onMouseDown={() => { setDestination(place); setDestinationInput(place.name); }}
                             className="block w-full border-b border-slate-800 px-4 py-3 text-left transition hover:bg-slate-800/80">
                             <p className="text-sm text-slate-100">{place.name}</p>
                             <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
@@ -1097,8 +1153,8 @@ export default function AgentHomePage() {
                         placeholder="Type to search checkpoint" />
                       {newStopInput && availableStopOptions.length > 0 && !availableStopOptions.some((p) => p.name === newStopInput) && (
                         <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
-                          {availableStopOptions.map((place) => (
-                            <button key={place.name} type="button" onMouseDown={() => { setNewStop(place); setNewStopInput(place.name); }}
+                          {availableStopOptions.map((place, idx) => (
+                            <button key={`${place.name}-${place.lat}-${place.lng}-${idx}`} type="button" onMouseDown={() => { setNewStop(place); setNewStopInput(place.name); }}
                               className="block w-full border-b border-slate-800 px-4 py-3 text-left transition hover:bg-slate-800/80">
                               <p className="text-sm text-slate-100">{place.name}</p>
                               <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
@@ -1145,7 +1201,7 @@ export default function AgentHomePage() {
           </MotionSection>
 
         /* ══════════════════════════════════════════════════════════════════
-            STEP 2 — Route Preview (Leaflet map + drag/edit + Wikipedia thumbs)
+            STEP 2 — Route Preview (Google Maps + drag/edit + Wikipedia thumbs)
         ══════════════════════════════════════════════════════════════════ */
         ) : currentStep === 2 ? (
           <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
@@ -1170,8 +1226,8 @@ export default function AgentHomePage() {
                       className="w-full rounded-lg border border-slate-600 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-300/70 focus:ring-2 focus:ring-blue-300/30" />
                     {previewStopInput && availablePreviewStopOptions.length > 0 && !availablePreviewStopOptions.some((p) => p.name === previewStopInput) && (
                       <div className="absolute z-40 mt-2 max-h-44 w-full overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
-                        {availablePreviewStopOptions.map((place) => (
-                          <button key={place.name} type="button" onMouseDown={() => { setPreviewStop(place); setPreviewStopInput(place.name); }}
+                        {availablePreviewStopOptions.map((place, idx) => (
+                          <button key={`${place.name}-${place.lat}-${place.lng}-${idx}`} type="button" onMouseDown={() => { setPreviewStop(place); setPreviewStopInput(place.name); }}
                             className="block w-full border-b border-slate-800 px-3 py-2 text-left transition hover:bg-slate-800/80">
                             <p className="text-sm text-slate-100">{place.name}</p>
                             <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
@@ -1206,8 +1262,8 @@ export default function AgentHomePage() {
                       className="w-full rounded-lg border border-slate-600 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-300/70 focus:ring-2 focus:ring-blue-300/30" />
                     {editStopInput && availableEditStopOptions.length > 0 && !availableEditStopOptions.some((p) => p.name === editStopInput) && (
                       <div className="absolute z-40 mt-2 max-h-44 w-full overflow-y-auto rounded-xl border border-slate-700 bg-slate-950/95 shadow-xl">
-                        {availableEditStopOptions.map((place) => (
-                          <button key={place.name} type="button" onMouseDown={() => { setEditStopSelection(place); setEditStopInput(place.name); }}
+                        {availableEditStopOptions.map((place, idx) => (
+                          <button key={`${place.name}-${place.lat}-${place.lng}-${idx}`} type="button" onMouseDown={() => { setEditStopSelection(place); setEditStopInput(place.name); }}
                             className="block w-full border-b border-slate-800 px-3 py-2 text-left transition hover:bg-slate-800/80">
                             <p className="text-sm text-slate-100">{place.name}</p>
                             <p className="text-xs text-slate-400">{place.lat.toFixed(2)}, {place.lng.toFixed(2)}</p>
@@ -1278,6 +1334,7 @@ export default function AgentHomePage() {
                     showRoute
                     originName={getPlaceLabel(origin)}
                     destinationName={getPlaceLabel(destination)}
+                    onRouteComputed={applyGoogleRouteMetrics}
                   />
                   <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
                     <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Mission Ready</p>
@@ -1454,7 +1511,7 @@ export default function AgentHomePage() {
           </MotionSection>
 
         /* ══════════════════════════════════════════════════════════════════
-            STEP 4 — Final Route (API place cards + Leaflet + Wikipedia photos)
+            STEP 4 — Final Route (API place cards + Google Maps + Wikipedia photos)
         ══════════════════════════════════════════════════════════════════ */
         ) : (
           <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
@@ -1491,14 +1548,18 @@ export default function AgentHomePage() {
                 </div>
               </div>
 
-              {/* Leaflet map */}
+              {/* Google Maps */}
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="relative h-full min-h-80 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70">
-                  <MapContainer center={routeMapPoints[0] ? [routeMapPoints[0].lat, routeMapPoints[0].lng] : [20, 0]} zoom={3} scrollWheelZoom className="h-full w-full z-10 custom-sea-blue-filter">
-                    <TileLayer attribution='&copy; <a href="https://carto.com/">CartoDB</a>' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-                    {routeMapPath.length > 1 && <Polyline positions={routeMapPath} pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }} />}
-                    {routeMapPoints.map((p, index) => <Marker key={`${p.name || 'route-point'}-${index}`} position={[p.lat, p.lng]} />)}
-                  </MapContainer>
+                  <PlacesMap
+                    places={mapPlacesForFinalRoute}
+                    routePlaces={routeMapPoints}
+                    className="h-80"
+                    showRoute
+                    originName={getPlaceLabel(origin)}
+                    destinationName={getPlaceLabel(destination)}
+                    onRouteComputed={applyGoogleRouteMetrics}
+                  />
                   <div className="absolute bottom-4 left-4 z-20 rounded border border-white/10 bg-black/60 p-2 px-4 text-[9px] font-mono text-cyan-400 backdrop-blur-md">Route_Map_View</div>
                 </div>
               </div>
@@ -1507,11 +1568,11 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{displayDistanceText}</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{displayTimeText}</p>
               </div>
             </div>
 
@@ -1610,14 +1671,7 @@ export default function AgentHomePage() {
           <p className="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-center shadow-sm">Secure Payments</p>
         </footer>
       </div>
-      <style jsx>{`
-        .custom-sea-blue-filter {
-          filter: hue-rotate(170deg) saturate(1.8) brightness(0.9) contrast(1.1) !important;
-        }
-        .leaflet-container {
-          background: #070a0d !important;
-        }
-      `}</style>
     </main>
   );
 }
+
