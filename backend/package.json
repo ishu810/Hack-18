@@ -12,9 +12,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@langchain/openai": "^1.1.2",
     "@langchain/community": "^1.1.27",
     "@langchain/core": "^1.1.38",
     "@langchain/ollama": "^1.2.6",
+    "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "chromadb": "^3.4.0",
     "cloudinary": "^2.9.0",

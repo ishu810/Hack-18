@@ -4,7 +4,8 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { createTrip, generateItinerary, generatePlaces, logoutUser, optimizeRoutePreview, selectPlaces } from '../api';
+import { createTrip, generateItinerary, generatePlaces, getFlightCost, logoutUser, selectPlaces } from '../api';
+import PlacesMap from '../components/PlacesMap';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -16,58 +17,102 @@ L.Icon.Default.mergeOptions({
 const MotionSection = motion.section;
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
 const HISTORY_KEY = 'agentJourneyHistory';
-const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', "Who's Going & Inclusions", 'Stay Preferences', 'Final Route'];
+const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', 'Journey Setup', 'Final Route'];
 const DUMMY_NIGHTS_PATTERN = [2, 1, 3, 2, 1, 2];
-const EXPERIENCE_OPTIONS = [
-  'Adventure',
-  'Historical Landmarks',
-  'Village Life',
-  'Culture',
-  'NightLife & Clubs',
-  'Hidden Gems',
-  'Stargazing',
-  'Food & Craft',
+
+const IR_SLABS = [
+  { max: 5, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 10, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 50, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 100, SL: 110, '3A': 468, '2A': 664, '1A': 1133 },
+  { max: 150, SL: 140, '3A': 468, '2A': 664, '1A': 1133 },
+  { max: 200, SL: 168, '3A': 577, '2A': 795, '1A': 1440 },
+  { max: 250, SL: 196, '3A': 640, '2A': 908, '1A': 1710 },
+  { max: 300, SL: 223, '3A': 711, '2A': 1018, '1A': 1980 },
+  { max: 400, SL: 275, '3A': 852, '2A': 1228, '1A': 2430 },
+  { max: 500, SL: 325, '3A': 990, '2A': 1430, '1A': 2870 },
+  { max: 600, SL: 375, '3A': 1130, '2A': 1638, '1A': 3310 },
+  { max: 700, SL: 422, '3A': 1260, '2A': 1838, '1A': 3740 },
+  { max: 800, SL: 468, '3A': 1390, '2A': 2038, '1A': 4170 },
+  { max: 900, SL: 512, '3A': 1518, '2A': 2230, '1A': 4590 },
+  { max: 1000, SL: 555, '3A': 1645, '2A': 2420, '1A': 5000 },
+  { max: 9999, SL: 600, '3A': 1780, '2A': 2620, '1A': 5400 },
 ];
-const GROUP_OPTIONS = [
-  { key: 'solo', label: 'Solo', icon: '🧑' },
-  { key: 'couple', label: 'Couple', icon: '💑' },
-  { key: 'friends', label: 'Friends', icon: '👬' },
-  { key: 'family', label: 'Family', icon: '👪' },
+
+const TRANSPORT_MODES = [
+  { key: 'flight', label: 'Flight' },
+  { key: 'train', label: 'Train' },
+  { key: 'bus', label: 'Bus' },
+  { key: 'car', label: 'Car' },
 ];
 
 // ─── Wikipedia Photo Helpers ───────────────────────────────────────────────────
 
-async function fetchWikipediaPhoto(locationName) {
+async function fetchWikipediaPhoto(locationName, searchHint = '') {
+  const buildQueries = (name, hint) => {
+    const base = String(name || '').split(',')[0].trim();
+    const extra = String(hint || '').split(',')[0].trim();
+    return [...new Set([
+      `${base} ${extra}`.trim(),
+      `${base} tourism`.trim(),
+      `${base} landmark`.trim(),
+      base,
+      extra,
+    ].filter(Boolean))];
+  };
+
   try {
     const simpleName = locationName.split(',')[0].trim();
-    const encoded = encodeURIComponent(simpleName);
+    const hintName = String(searchHint || '').split(',')[0].trim();
 
-    // 1. Try direct page summary
-    const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encoded}`);
-    const data = await res.json();
-    if (data.thumbnail?.source) return data.thumbnail.source;
+    for (const query of buildQueries(simpleName, hintName)) {
+      // 1. Try direct page summary
+      const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
+      const data = await res.json();
+      if (data.thumbnail?.source) return data.thumbnail.source;
+    }
 
     // 2. Fallback: search API
-    const searchRes = await fetch(
-      `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encoded}&format=json&origin=*`
-    );
-    const searchData = await searchRes.json();
-    const topTitle = searchData.query?.search?.[0]?.title;
-    if (!topTitle) return null;
+    for (const query of buildQueries(simpleName, hintName)) {
+      const searchRes = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`
+      );
+      const searchData = await searchRes.json();
+      const topTitle = searchData.query?.search?.[0]?.title;
+      if (!topTitle) continue;
 
-    const finalRes = await fetch(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`
-    );
-    const finalData = await finalRes.json();
-    return finalData.thumbnail?.source || null;
+      const finalRes = await fetch(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topTitle)}`
+      );
+      const finalData = await finalRes.json();
+      if (finalData.thumbnail?.source) return finalData.thumbnail.source;
+    }
   } catch {
-    return null;
+    try {
+      const simpleName = locationName.split(',')[0].trim();
+      const hintName = String(searchHint || '').split(',')[0].trim();
+
+      for (const query of buildQueries(simpleName, hintName)) {
+        const commonsRes = await fetch(
+          `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&prop=imageinfo&iiprop=url&iiurlwidth=900&format=json&origin=*`,
+        );
+        const commonsData = await commonsRes.json();
+        const pages = commonsData?.query?.pages || {};
+        const firstPage = Object.values(pages)[0];
+        const imageUrl = firstPage?.imageinfo?.[0]?.thumburl || firstPage?.imageinfo?.[0]?.url || null;
+        if (imageUrl) return imageUrl;
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 }
 
 // ─── LocationPhoto Component ───────────────────────────────────────────────────
 
-function LocationPhoto({ placeName, className = '' }) {
+function LocationPhoto({ placeName, searchHint = '', className = '' }) {
   const [photoUrl, setPhotoUrl] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -75,11 +120,11 @@ function LocationPhoto({ placeName, className = '' }) {
     if (!placeName) { setLoading(false); return; }
     setLoading(true);
     setPhotoUrl(null);
-    fetchWikipediaPhoto(placeName).then((url) => {
+    fetchWikipediaPhoto(placeName, searchHint).then((url) => {
       setPhotoUrl(url);
       setLoading(false);
     });
-  }, [placeName]);
+  }, [placeName, searchHint]);
 
   if (loading) return <div className={`animate-pulse rounded-xl bg-slate-800 ${className}`} />;
   if (!photoUrl) return (
@@ -179,6 +224,106 @@ function distanceKmCoords(a, b) {
   return 6371 * 2 * Math.atan2(Math.sqrt(aVal), Math.sqrt(1 - aVal));
 }
 
+function getTrainFare(distKm, cls) {
+  const slab = IR_SLABS.find((s) => distKm <= s.max) || IR_SLABS[IR_SLABS.length - 1];
+  return Number(slab?.[cls] || 0);
+}
+
+function formatDuration(mins) {
+  const total = Math.max(1, Math.round(Number(mins) || 0));
+  if (total >= 60) {
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return `${h}h ${m}m`;
+  }
+  return `${total}m`;
+}
+
+function formatInr(value) {
+  return `\u20b9${Math.round(Number(value) || 0).toLocaleString('en-IN')}`;
+}
+
+function formatInrRange(minValue, maxValue) {
+  const minSafe = Math.max(0, Math.round(Number(minValue) || 0));
+  const maxSafe = Math.max(minSafe, Math.round(Number(maxValue) || 0));
+  return `${formatInr(minSafe)} - ${formatInr(maxSafe)}`;
+}
+
+function getModeDurationMinutes(mode, distanceKm) {
+  const dist = Math.max(1, Number(distanceKm) || 1);
+  if (mode === 'flight') return Math.round((dist / 700) * 60 + 150);
+  if (mode === 'train') return Math.round(((dist * 1.4) / 80) * 60);
+  if (mode === 'bus') return Math.round(((dist * 1.3) / 55) * 60);
+  return Math.round(((dist * 1.2) / 65) * 60);
+}
+
+function getSegmentKey(from, to) {
+  return `${String(from || '').trim()}|${String(to || '').trim()}`;
+}
+
+function modeIcon(mode) {
+  if (mode === 'flight') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M2 16l20-8-8 20-2-8-8-4z" />
+      </svg>
+    );
+  }
+
+  if (mode === 'train') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="6" y="3" width="12" height="14" rx="2" />
+        <path d="M8 7h8M9 12h.01M15 12h.01M8 21l2-3m6 3-2-3" />
+      </svg>
+    );
+  }
+
+  if (mode === 'bus') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="13" rx="2" />
+        <path d="M7 17v2m10-2v2M6 9h12" />
+        <circle cx="8" cy="19" r="1" />
+        <circle cx="16" cy="19" r="1" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 11l1-3a2 2 0 0 1 1.9-1.3h8.2A2 2 0 0 1 18 8l1 3" />
+      <rect x="4" y="11" width="16" height="6" rx="1.5" />
+      <circle cx="8" cy="17" r="1" />
+      <circle cx="16" cy="17" r="1" />
+    </svg>
+  );
+}
+
+function summarizeOrderedRoute(route) {
+  const points = (Array.isArray(route) ? route : [])
+    .map((point) => ({
+      lat: Number(point?.lat),
+      lng: Number(point?.lng ?? point?.lon),
+    }))
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+
+  if (points.length < 2) {
+    return { totalDistance: 0, estimatedHours: 0 };
+  }
+
+  let totalDistance = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    totalDistance += distanceKmCoords(points[index], points[index + 1]);
+  }
+
+  const estimatedHours = Math.max(1, Math.round((totalDistance / 50) * 10) / 10);
+  return {
+    totalDistance: Math.max(1, Math.round(totalDistance)),
+    estimatedHours,
+  };
+}
+
 function findBestRoute(origin, destination, stops) {
   const rem = [...stops], ordered = [origin];
   let current = origin, total = 0;
@@ -193,38 +338,8 @@ function findBestRoute(origin, destination, stops) {
   }
   total += distanceKmCoords(current, destination);
   ordered.push(destination);
-  return { route: ordered, totalDistance: Math.round(total), estimatedHours: Math.max(1, Math.round(total / 780)) };
-}
-
-function reorderRouteByStopNames(routePoints, orderedStops) {
-  if (!Array.isArray(routePoints) || routePoints.length === 0) return [];
-  if (!Array.isArray(orderedStops) || orderedStops.length === 0) return routePoints;
-
-  const normalize = (value) => normalizeName(value).toLowerCase();
-  const used = new Set();
-  const ordered = [];
-
-  orderedStops.forEach((stopName) => {
-    const stopNorm = normalize(stopName);
-    if (!stopNorm) return;
-
-    const matchIndex = routePoints.findIndex((point, index) => {
-      if (used.has(index)) return false;
-      const pointNorm = normalize(point);
-      return pointNorm === stopNorm || stopNorm.includes(pointNorm) || pointNorm.includes(stopNorm);
-    });
-
-    if (matchIndex >= 0) {
-      used.add(matchIndex);
-      ordered.push(routePoints[matchIndex]);
-    }
-  });
-
-  routePoints.forEach((point, index) => {
-    if (!used.has(index)) ordered.push(point);
-  });
-
-  return ordered;
+  const metrics = summarizeOrderedRoute(ordered);
+  return { route: ordered, ...metrics };
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
@@ -252,6 +367,8 @@ export default function AgentHomePage() {
   const [result, setResult] = useState(null);
   const [finalizedRoute, setFinalizedRoute] = useState([]);
   const [stayPreferences, setStayPreferences] = useState({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
+  const [segmentModes, setSegmentModes] = useState({});
+  const [flightFares, setFlightFares] = useState({});
   const [history, setHistory] = useState([]);
   const [error, setError] = useState('');
 
@@ -264,6 +381,19 @@ export default function AgentHomePage() {
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
   const [routeOptimizing, setRouteOptimizing] = useState(false);
+
+  // Doc-2 route-edit state
+  const [dragStopIndex, setDragStopIndex] = useState(null);
+  const [dragRouteIndex, setDragRouteIndex] = useState(null);
+  const [previewStop, setPreviewStop] = useState(null);
+  const [previewStopInput, setPreviewStopInput] = useState('');
+  const [previewNights, setPreviewNights] = useState(1);
+  const [showPreviewAddBox, setShowPreviewAddBox] = useState(false);
+  const [showPreviewEditBox, setShowPreviewEditBox] = useState(false);
+  const [editingRouteIndex, setEditingRouteIndex] = useState(null);
+  const [editStopInput, setEditStopInput] = useState('');
+  const [editNights, setEditNights] = useState(1);
+  const [editStopSelection, setEditStopSelection] = useState(null);
 
   // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
@@ -308,41 +438,272 @@ export default function AgentHomePage() {
   }, [stopSuggestions, origin, destination, stops]);
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
-  const previewRouteList = finalizedRoute.length > 0
-    ? finalizedRoute
-    : (result?.routeMetrics?.orderedStops?.length
-      ? result.routeMetrics.orderedStops.map((stop) => ({ name: stop }))
-      : activeRoute);
-  const previewSelectedNames = new Set(previewRouteList.map((p) => getPlaceLabel(p)));
+  const routeSegments = useMemo(() => {
+    const normalized = (Array.isArray(activeRoute) ? activeRoute : [])
+      .map((point) => ({
+        name: String(point?.name || '').trim(),
+        lat: Number(point?.lat),
+        lng: Number(point?.lng ?? point?.lon),
+      }))
+      .filter((point) => point.name && Number.isFinite(point.lat) && Number.isFinite(point.lng));
+
+    if (normalized.length < 2) return [];
+
+    const segments = [];
+    for (let index = 0; index < normalized.length - 1; index += 1) {
+      const from = normalized[index];
+      const to = normalized[index + 1];
+      const distanceKm = Math.max(1, Math.round(distanceKmCoords(from, to)));
+      const key = getSegmentKey(from.name, to.name);
+      segments.push({ key, from: from.name, to: to.name, distanceKm });
+    }
+    return segments;
+  }, [activeRoute]);
+
+  useEffect(() => {
+    if (!stayPreferences?.segmentModes || Object.keys(stayPreferences.segmentModes).length === 0) return;
+    setSegmentModes((prev) => (Object.keys(prev).length ? prev : stayPreferences.segmentModes));
+  }, [stayPreferences]);
+
+  useEffect(() => {
+    const activeKeys = new Set(routeSegments.map((segment) => segment.key));
+    setSegmentModes((prev) => {
+      const next = {};
+      Object.entries(prev || {}).forEach(([key, value]) => {
+        if (activeKeys.has(key)) next[key] = value;
+      });
+      return next;
+    });
+    setFlightFares((prev) => {
+      const next = {};
+      Object.entries(prev || {}).forEach(([key, value]) => {
+        if (activeKeys.has(key)) next[key] = value;
+      });
+      return next;
+    });
+  }, [routeSegments]);
+
+  useEffect(() => {
+    if (currentStep !== 3 || routeSegments.length === 0) return;
+
+    routeSegments.forEach((segment) => {
+      const existing = flightFares[segment.key];
+      if (existing?.loading || existing?.resolved) return;
+
+      setFlightFares((prev) => ({
+        ...prev,
+        [segment.key]: { loading: true, resolved: false, error: false, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
+      }));
+
+      getFlightCost({ from: segment.from, to: segment.to })
+        .then((data) => {
+          const minFare = Number(data?.minFare);
+          if (data?.success && Number.isFinite(minFare) && minFare > 0) {
+            setFlightFares((prev) => ({
+              ...prev,
+              [segment.key]: {
+                loading: false,
+                resolved: true,
+                error: false,
+                noFlights: false,
+                minFare: Math.round(minFare),
+                currency: String(data?.currency || 'INR'),
+                oneWayMinutes: data?.oneWayMinutes != null && Number.isFinite(Number(data.oneWayMinutes)) ? Number(data.oneWayMinutes) : null,
+              },
+            }));
+            return;
+          }
+
+          setFlightFares((prev) => ({
+            ...prev,
+            [segment.key]: {
+              loading: false,
+              resolved: true,
+              error: !Boolean(data?.noFlights),
+              noFlights: Boolean(data?.noFlights),
+              minFare: null,
+              currency: 'INR',
+              oneWayMinutes: null,
+            },
+          }));
+        })
+        .catch(() => {
+          setFlightFares((prev) => ({
+            ...prev,
+            [segment.key]: { loading: false, resolved: true, error: true, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
+          }));
+        });
+    });
+  }, [currentStep, routeSegments, flightFares]);
+
+  const getSegmentSelection = (segmentKey) => {
+    const saved = segmentModes?.[segmentKey];
+    return {
+      mode: saved?.mode || 'car',
+      trainClass: saved?.trainClass || '3A',
+      cost: Number(saved?.cost || 0),
+      timeMin: Number(saved?.timeMin || 0),
+    };
+  };
+
+  const getModeMeta = (segment, mode, trainClass) => {
+    const dist = Number(segment?.distanceKm || 0);
+    const timeMin = getModeDurationMinutes(mode, dist);
+
+    if (mode === 'train') {
+      const selectedClass = trainClass || '3A';
+      const fare = getTrainFare(dist, selectedClass);
+      return {
+        timeMin,
+        costValue: fare,
+        costLabel: `${formatInr(fare)} (${selectedClass})`,
+      };
+    }
+
+    if (mode === 'bus') {
+      const base = Math.round(dist * 1.1);
+      const min = Math.round(base * 0.8);
+      const max = Math.round(base * 1.3);
+      return {
+        timeMin,
+        costValue: min,
+        costLabel: formatInrRange(min, max),
+      };
+    }
+
+    if (mode === 'car') {
+      const base = Math.round(dist * 13);
+      const min = Math.round(base * 0.9);
+      const max = Math.round(base * 1.1);
+      return {
+        timeMin,
+        costValue: min,
+        costLabel: formatInrRange(min, max),
+      };
+    }
+
+    const fareState = flightFares[segment.key];
+    if (fareState?.loading) {
+      return {
+        timeMin,
+        costValue: Number.POSITIVE_INFINITY,
+        costLabel: 'Fetching live fare...',
+      };
+    }
+
+    if (fareState?.noFlights) {
+      return {
+        timeMin,
+        costValue: Number.POSITIVE_INFINITY,
+        costLabel: 'No flights available',
+      };
+    }
+
+    if (fareState?.minFare) {
+      const apiTime = fareState?.oneWayMinutes;
+      return {
+        timeMin: apiTime != null && Number.isFinite(Number(apiTime)) ? Number(apiTime) : timeMin,
+        costValue: Number(fareState.minFare),
+        costLabel: `${formatInr(fareState.minFare)} (live)`,
+      };
+    }
+
+    return {
+      timeMin,
+      costValue: 4000,
+      costLabel: '\u20b94,000 - \u20b912,000 (est.)',
+    };
+  };
+
+  const selectSegmentMode = (segment, mode) => {
+    const key = segment.key;
+    const prev = getSegmentSelection(key);
+    const trainClass = prev.trainClass || '3A';
+    const meta = getModeMeta(segment, mode, trainClass);
+
+    setSegmentModes((current) => ({
+      ...current,
+      [key]: {
+        mode,
+        trainClass,
+        cost: meta.costValue,
+        timeMin: meta.timeMin,
+      },
+    }));
+  };
+
+  const selectTrainClass = (segment, trainClass) => {
+    const key = segment.key;
+    const prev = getSegmentSelection(key);
+    const meta = getModeMeta(segment, 'train', trainClass);
+
+    setSegmentModes((current) => ({
+      ...current,
+      [key]: {
+        mode: 'train',
+        trainClass,
+        cost: meta.costValue,
+        timeMin: meta.timeMin,
+      },
+    }));
+  };
+  const checkpointMapPlaces = activeRoute
+    .map((place) => ({
+      name: place?.name || '',
+      location: place?.name || '',
+      lat: Number(place?.lat),
+      lng: Number(place?.lng),
+      best_visit_reason: '',
+    }))
+    .filter((place) => Number.isFinite(place.lat) && Number.isFinite(place.lng));
+
+  const finalMapPlaces = activeRoute
+    .slice(1)
+    .flatMap((place) => {
+      const checkpointKey = normalizeName(place);
+      return (checkpointPlaces[checkpointKey] || []).filter(
+        (candidate) => !hiddenPlaces[checkpointKey]?.[normalizeName(candidate.name)],
+      );
+    })
+    .filter((candidate, index, all) =>
+      all.findIndex((item) => `${item.name}|${item.location}` === `${candidate.name}|${candidate.location}`) === index,
+    );
+  const mapPlacesForFinalRoute = finalMapPlaces.length ? finalMapPlaces : checkpointMapPlaces;
+  const previewSelectedNames = new Set(activeRoute.map((p) => getPlaceLabel(p)));
   const availablePreviewStopOptions = previewStopSuggestions.filter((p) => !previewSelectedNames.has(p.name));
-  const occupiedEditNames = new Set(previewRouteList.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
+  const occupiedEditNames = new Set(activeRoute.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
   const availableEditStopOptions = editStopSuggestions.filter((p) => !occupiedEditNames.has(p.name));
-  const routeMapPoints = activeRoute.filter((p) => typeof p?.lat === 'number' && typeof p?.lng === 'number');
+  const routeMapPoints = activeRoute
+    .map((p) => ({
+      ...p,
+      lat: Number(p?.lat),
+      lng: Number(p?.lng ?? p?.lon),
+    }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
-  const routeDistanceLabel = result?.routeMetrics?.distanceText || `${result?.totalDistance || 0} km`;
-  const routeDurationLabel = result?.routeMetrics?.durationText || `${result?.estimatedHours || 0} hrs`;
-  const routeSourceLabel = result?.routeMetrics?.source === 'google_maps'
-    ? 'Google Maps Optimized'
-    : 'Local Fallback Optimization';
+
+  const commitRouteChange = (nextRoute) => {
+    const next = Array.isArray(nextRoute) ? nextRoute : [];
+    setFinalizedRoute(next);
+
+    if (!result) return;
+
+    const metrics = summarizeOrderedRoute(next);
+    setResult((prev) => (prev ? {
+      ...prev,
+      route: next,
+      totalDistance: metrics.totalDistance,
+      estimatedHours: metrics.estimatedHours,
+      routeMetrics: metrics,
+    } : prev));
+  };
 
   const getNightLabel = (place, index) => {
     const n = Number(place?.nights);
     if (Number.isFinite(n) && n > 0) return `${n} night${n > 1 ? 's' : ''}`;
     const f = DUMMY_NIGHTS_PATTERN[index % DUMMY_NIGHTS_PATTERN.length];
     return `${f} night${f > 1 ? 's' : ''}`;
-  };
-
-  const toggleExperience = (option) => {
-    setSelectedExperiences((prev) => (
-      prev.includes(option)
-        ? prev.filter((item) => item !== option)
-        : [...prev, option]
-    ));
-  };
-
-  const toggleInclusion = (key) => {
-    setInclusions((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   // ── Stop management ──
@@ -377,7 +738,7 @@ export default function AgentHomePage() {
     const next = [...src];
     const [m] = next.splice(from, 1);
     next.splice(to, 0, m);
-    setFinalizedRoute(next);
+    commitRouteChange(next);
   };
 
   const editRoutePoint = (index) => {
@@ -398,7 +759,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     const point = src[index];
     if (!point || getPlaceLabel(point) === getPlaceLabel(origin)) return;
-    setFinalizedRoute(src.filter((_, i) => i !== index));
+    commitRouteChange(src.filter((_, i) => i !== index));
   };
 
   const addPreviewDestination = () => {
@@ -415,7 +776,7 @@ export default function AgentHomePage() {
       nights: Math.max(1, Number(previewNights || 1)),
     };
     setError('');
-    setFinalizedRoute([...src, newPoint]);
+    commitRouteChange([...src, newPoint]);
     setPreviewStop(null); setPreviewStopInput(''); setPreviewNights(1);
     setShowPreviewAddBox(false); setDragRouteIndex(null);
   };
@@ -427,7 +788,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     if (editingRouteIndex < 0 || editingRouteIndex >= src.length) return;
     setError('');
-    setFinalizedRoute(src.map((item, i) =>
+    commitRouteChange(src.map((item, i) =>
       i === editingRouteIndex
         ? { ...item, name: nextName, lat: editStopSelection?.lat ?? item.lat, lng: editStopSelection?.lng ?? item.lng, nights: Math.max(1, Number(editNights || 1)) }
         : item
@@ -436,63 +797,26 @@ export default function AgentHomePage() {
   };
 
   // ── Build journey ──
-  const buildJourney = async () => {
+  const buildJourney = () => {
     setError(''); setPlacesError(''); setCheckpointPlaces({}); setPlacesRequestKey(''); setHiddenPlaces({});
     if (!origin || !destination) { setError('Select valid start and destination cities from suggestions.'); return; }
     if (origin.name === destination.name) { setError('Origin and destination must be different.'); return; }
     if (!departureDate || !comingDate) { setError('Please add both departure and coming dates.'); return; }
     if (new Date(comingDate) < new Date(departureDate)) { setError('Coming date must be after departure date.'); return; }
-
     const optimized = findBestRoute(origin, destination, stops);
-    let route = optimized.route;
-    let routeMetrics = {
-      source: 'local_fallback',
-      distanceText: `${optimized.totalDistance} km`,
-      durationText: `${optimized.estimatedHours} hrs`,
-      orderedStops: optimized.route.map((point) => getPlaceLabel(point)).filter(Boolean),
-    };
-
-    try {
-      setRouteOptimizing(true);
-      const previewResp = await optimizeRoutePreview({
-        origin: normalizeName(origin),
-        destination: normalizeName(destination),
-        stops: stops.map((stop) => normalizeName(stop)).filter(Boolean),
-      });
-
-      const orderedStops = previewResp?.route_overview?.ordered_stops || [];
-      const mapOptimizedRoute = reorderRouteByStopNames(optimized.route, orderedStops);
-
-      if (mapOptimizedRoute.length >= 2) {
-        route = mapOptimizedRoute;
-      }
-
-      if (previewResp?.route_overview?.total_distance || previewResp?.route_overview?.total_duration) {
-        routeMetrics = {
-          source: previewResp?.route_source || 'google_maps',
-          distanceText: previewResp?.route_overview?.total_distance || routeMetrics.distanceText,
-          durationText: previewResp?.route_overview?.total_duration || routeMetrics.durationText,
-          orderedStops: Array.isArray(previewResp?.route_overview?.ordered_stops)
-            ? previewResp.route_overview.ordered_stops
-            : routeMetrics.orderedStops,
-        };
-      }
-    } catch (err) {
-      console.warn('Route optimization preview fallback:', err?.message || err);
-    } finally {
-      setRouteOptimizing(false);
-    }
-
     const journeyRecord = {
       id: Date.now(), createdAt: new Date().toISOString(),
-      origin, destination, departureDate, comingDate, budgetRange, selectedExperiences, stops,
-      route,
+      origin, destination, departureDate, comingDate, budgetRange, stops,
+      route: optimized.route,
       totalDistance: optimized.totalDistance,
       estimatedHours: optimized.estimatedHours,
-      routeMetrics,
+      routeMetrics: {
+        totalDistance: optimized.totalDistance,
+        estimatedHours: optimized.estimatedHours,
+      },
     };
     setResult(journeyRecord);
-    setFinalizedRoute(route);
+    setFinalizedRoute(optimized.route);
     setShowPreviewAddBox(false); setShowPreviewEditBox(false);
     setEditingRouteIndex(null); setEditStopSelection(null);
     setCurrentStep(2);
@@ -506,6 +830,14 @@ export default function AgentHomePage() {
       const next = [...prev];
       const di = next.findIndex((cp) => cp.name === destination.name);
       di >= 0 ? next.splice(di, 0, place) : next.push(place);
+      const metrics = summarizeOrderedRoute(next);
+      setResult((current) => (current ? {
+        ...current,
+        route: next,
+        totalDistance: metrics.totalDistance,
+        estimatedHours: metrics.estimatedHours,
+        routeMetrics: metrics,
+      } : current));
       return next;
     });
   };
@@ -514,7 +846,7 @@ export default function AgentHomePage() {
   const approveJourney = async () => {
     if (!result) return;
     const routeForPlanner = finalizedRoute.length > 0 ? finalizedRoute : result.route;
-    const approvedJourney = { ...result, route: routeForPlanner, stayPreferences, groupType, inclusions };
+    const approvedJourney = { ...result, route: routeForPlanner, stayPreferences };
     const approvedHistory = [approvedJourney, ...history].slice(0, 12);
     setHistory(approvedHistory);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(approvedHistory));
@@ -525,7 +857,17 @@ export default function AgentHomePage() {
         const key = normalizeName(place);
         return (checkpointPlaces[key] || []).filter((c) => !hiddenPlaces[key]?.[normalizeName(c.name)]);
       })
-      .map((c) => ({ name: c.name, type: c.type, location: c.location, best_visit_reason: c.best_visit_reason, imageUrl: c.imageUrl }))
+      .map((c) => ({
+        name: c.name,
+        type: c.type,
+        location: c.location,
+        lat: Number(c?.lat),
+        lng: Number(c?.lng ?? c?.lon),
+        rating: Number(c?.rating),
+        popularity: Number(c?.popularity),
+        best_visit_reason: c.best_visit_reason,
+        imageUrl: c.imageUrl,
+      }))
       .filter((c, i, all) => all.findIndex((x) => `${x.name}|${x.location}` === `${c.name}|${c.location}`) === i);
 
     const fallbackRoutePlaces = routeForPlanner
@@ -538,6 +880,8 @@ export default function AgentHomePage() {
           name: label,
           type: 'route-stop',
           location: label,
+          lat: Number(place?.lat),
+          lng: Number(place?.lng ?? place?.lon),
           best_visit_reason: 'Route stop added from the approved journey path.',
           imageUrl: '',
         };
@@ -558,6 +902,7 @@ export default function AgentHomePage() {
           stops: deriveRouteStops(routeForPlanner, originName, destinationName),
           budget: Number(budgetRange?.[1] || 0),
           dates: [departureDate, comingDate].filter(Boolean),
+          stayPreferences,
         });
         currentTripId = created?.trip?._id || '';
         if (!currentTripId) throw new Error('Unable to create trip for itinerary generation.');
@@ -577,15 +922,15 @@ export default function AgentHomePage() {
 
   // ── Fetch places on step 4 ──
   useEffect(() => {
-    if (currentStep !== 4 || !result || previewRouteList.length === 0) return;
+    if (currentStep !== 4 || !result || activeRoute.length === 0) return;
     const originName = normalizeName(origin), destinationName = normalizeName(destination);
     const payload = {
       origin: originName, destination: destinationName,
-      stops: deriveRouteStops(previewRouteList, originName, destinationName),
+      stops: deriveRouteStops(activeRoute, originName, destinationName),
       budget: Number(budgetRange?.[1] || 0),
       dates: [departureDate, comingDate].filter(Boolean),
     };
-    const requestKey = JSON.stringify({ route: previewRouteList.map((p) => normalizeName(p)), dates: payload.dates, budget: payload.budget });
+    const requestKey = JSON.stringify({ route: activeRoute.map((p) => normalizeName(p)), dates: payload.dates, budget: payload.budget });
     if (requestKey === placesRequestKey) return;
 
     (async () => {
@@ -597,7 +942,7 @@ export default function AgentHomePage() {
         setDraftTripId(tripId);
         const placeResp = await generatePlaces(tripId);
         const candidates = Array.isArray(placeResp?.places) ? placeResp.places : [];
-        setCheckpointPlaces(groupPlacesByCheckpoint(previewRouteList, candidates));
+        setCheckpointPlaces(groupPlacesByCheckpoint(activeRoute, candidates));
         setPlacesRequestKey(requestKey);
       } catch (err) {
         setPlacesError(err.message || 'Failed to load checkpoint recommendations.');
@@ -605,7 +950,7 @@ export default function AgentHomePage() {
         setPlacesLoading(false);
       }
     })();
-  }, [budgetRange, comingDate, currentStep, departureDate, destination, origin, placesRequestKey, previewRouteList, result]);
+  }, [activeRoute, budgetRange, comingDate, currentStep, departureDate, destination, origin, placesRequestKey, result]);
 
   const hidePlaceCard = (checkpointName, placeName) => {
     const ck = normalizeName(checkpointName), pk = normalizeName(placeName);
@@ -621,18 +966,15 @@ export default function AgentHomePage() {
   const resetPlanner = () => {
     setResult(null); setFinalizedRoute([]); setError('');
     setOrigin(null); setOriginInput(''); setDestination(null); setDestinationInput('');
-    setSelectedExperiences([]);
-    setGroupType('solo');
-    setInclusions({ stay: true, flights: true, activitiesAndTransfers: true });
     setNewStop(null); setNewStopInput(''); setStops([]);
     setDragStopIndex(null); setDragRouteIndex(null);
     setPreviewStop(null); setPreviewStopInput(''); setPreviewNights(1);
     setShowPreviewAddBox(false); setShowPreviewEditBox(false);
     setEditingRouteIndex(null); setEditStopInput(''); setEditNights(1); setEditStopSelection(null);
     setStayPreferences({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
+    setSegmentModes({}); setFlightFares({});
     setCheckpointPlaces({}); setPlacesLoading(false); setPlacesError('');
     setPlacesRequestKey(''); setHiddenPlaces({}); setDraftTripId(''); setItineraryLoading(false);
-    setRouteOptimizing(false);
     setCurrentStep(1);
   };
 
@@ -766,27 +1108,6 @@ export default function AgentHomePage() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
-                  <p className="mb-3 text-sm font-medium text-slate-300">Choose your experience</p>
-                  <div className="flex flex-wrap gap-3">
-                    {EXPERIENCE_OPTIONS.map((option) => {
-                      const isSelected = selectedExperiences.includes(option);
-                      return (
-                        <button
-                          key={option}
-                          type="button"
-                          onClick={() => toggleExperience(option)}
-                          className={`rounded-full border px-4 py-2 text-sm font-medium transition ${isSelected
-                            ? 'border-amber-300/70 bg-amber-300/15 text-amber-100'
-                            : 'border-slate-600 bg-slate-900/70 text-slate-200 hover:border-slate-400'}`}
-                        >
-                          {option}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
                 {/* Checkpoints */}
                 <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                   <p className="mb-3 text-sm font-medium text-slate-300">Route Checkpoints</p>
@@ -837,8 +1158,8 @@ export default function AgentHomePage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <button type="button" onClick={resetPlanner}
                     className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Cancel</button>
-                  <button type="button" onClick={buildJourney} disabled={routeOptimizing}
-                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70">{routeOptimizing ? 'Optimizing Route...' : 'Continue'}</button>
+                  <button type="button" onClick={buildJourney}
+                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110">Continue</button>
                 </div>
               </div>
             </div>
@@ -934,7 +1255,7 @@ export default function AgentHomePage() {
               {/* Route list: drag + Wikipedia thumb + edit/delete */}
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
-                  {previewRouteList.map((place, index) => {
+                  {activeRoute.map((place, index) => {
                     const isCore = getPlaceLabel(place) === getPlaceLabel(origin);
                     const isSelected = finalizedRoute.some((cp) => cp.name === place.name);
                     return (
@@ -946,7 +1267,7 @@ export default function AgentHomePage() {
                         className={`w-full rounded-xl border px-4 py-3 text-left transition ${isSelected ? 'border-amber-300/50 bg-amber-300/10' : 'border-slate-700 bg-slate-950/45 opacity-60 hover:border-amber-300/40 hover:opacity-100'} ${isCore ? 'cursor-default' : 'cursor-move'}`}>
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex min-w-0 flex-1 items-center gap-3">
-                            <LocationPhoto placeName={getPlaceLabel(place)} className="h-10 w-14 shrink-0 rounded-lg" />
+                            <LocationPhoto placeName={getPlaceLabel(place)} searchHint={place.location || getPlaceLabel(destination)} className="h-10 w-14 shrink-0 rounded-lg" />
                             <div className="min-w-0">
                               <p className={`truncate text-sm font-medium ${isSelected ? 'text-slate-100' : 'text-slate-400'}`}>{getPlaceLabel(place)}</p>
                               <p className="text-[0.68rem] uppercase tracking-[0.16em] text-slate-500">Stay: {getNightLabel(place, index)}</p>
@@ -968,15 +1289,22 @@ export default function AgentHomePage() {
                 </div>
               </div>
 
-              {/* Leaflet map */}
+              {/* Final route map + mission status */}
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
-                <div className="relative h-full min-h-80 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/70">
-                  <MapContainer center={routeMapPoints[0] ? [routeMapPoints[0].lat, routeMapPoints[0].lng] : [20, 0]} zoom={3} scrollWheelZoom className="h-full w-full z-10 custom-sea-blue-filter">
-                    <TileLayer attribution='&copy; <a href="https://carto.com/">CartoDB</a>' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-                    {routeMapPath.length > 1 && <Polyline positions={routeMapPath} pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }} />}
-                    {routeMapPoints.map((p) => <Marker key={p.name} position={[p.lat, p.lng]} />)}
-                  </MapContainer>
-                  <div className="absolute bottom-4 left-4 z-20 rounded border border-white/10 bg-black/60 p-2 px-4 text-[9px] font-mono text-cyan-400 backdrop-blur-md">Route_Map_View</div>
+                <div className="space-y-3">
+                  <PlacesMap
+                    places={mapPlacesForFinalRoute}
+                    routePlaces={checkpointMapPlaces}
+                    className="h-80"
+                    showRoute
+                    originName={getPlaceLabel(origin)}
+                    destinationName={getPlaceLabel(destination)}
+                  />
+                  <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
+                    <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Mission Ready</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-100">{getPlaceLabel(origin)} -&gt; {getPlaceLabel(destination)}</p>
+                    <p className="mt-1 text-xs text-slate-400">All route, budget, and stay selections are locked for review.</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -997,87 +1325,108 @@ export default function AgentHomePage() {
               <button type="button" onClick={resetPlanner}
                 className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Back</button>
               <button type="button" onClick={() => setCurrentStep(3)}
-                className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">Continue to Stay Preferences</button>
+                className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">Continue to Journey Setup</button>
             </div>
           </MotionSection>
 
         /* ══════════════════════════════════════════════════════════════════
-            STEP 3 — Stay Preferences
+            STEP 3 — Journey Setup
         ══════════════════════════════════════════════════════════════════ */
         ) : currentStep === 3 ? (
           <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="mx-auto w-full max-w-4xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
-            <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Who's Going & Inclusions</h2>
-            <p className="mt-2 text-sm text-slate-400">Set traveler type and core package inclusions before stay preferences.</p>
+            className="mx-auto w-full max-w-6xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
+            <h2 className="text-3xl font-semibold tracking-tight text-slate-100">Journey Setup</h2>
+            <p className="mt-2 text-sm text-slate-400">Choose transport for each segment, then confirm stay preferences.</p>
 
-            <div className="mt-8 space-y-6">
-              <div className="rounded-xl border border-amber-300/30 bg-slate-950/55 p-4">
-                <p className="mb-3 text-lg font-semibold text-slate-100">Group Type</p>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                  {GROUP_OPTIONS.map((group) => {
-                    const isSelected = groupType === group.key;
-                    return (
-                      <button
-                        key={group.key}
-                        type="button"
-                        onClick={() => setGroupType(group.key)}
-                        className={`rounded-xl border p-4 text-center transition ${isSelected
-                          ? 'border-amber-300 bg-amber-300/10 text-amber-100'
-                          : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-amber-300/45'}`}
-                      >
-                        <p className="text-4xl">{group.icon}</p>
-                        <p className="mt-2 text-lg font-medium">{group.label}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+            <div className="mt-7 rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6">
+              {routeSegments.length === 0 ? (
+                <p className="text-sm text-slate-400">Build at least two route points to configure transport.</p>
+              ) : routeSegments.map((segment, segmentIndex) => {
+                const selected = getSegmentSelection(segment.key);
+                const modeCards = TRANSPORT_MODES.map((item) => {
+                  const meta = getModeMeta(segment, item.key, selected.trainClass);
+                  const isSelected = selected.mode === item.key;
 
-              <div className="rounded-xl border border-amber-300/30 bg-slate-950/55 p-4">
-                <p className="mb-3 text-lg font-semibold text-slate-100">Pick your inclusions</p>
-                <div className="divide-y divide-slate-700 rounded-xl border border-slate-700 bg-slate-900/70">
-                  {[
-                    ['stay', 'Stay'],
-                    ['flights', 'Flights'],
-                    ['activitiesAndTransfers', 'Activities and Transfers'],
-                  ].map(([key, label]) => (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => toggleInclusion(key)}
-                      className="flex w-full items-center justify-between px-4 py-4 text-left transition hover:bg-slate-800/70"
-                    >
-                      <span className="text-base text-slate-100">{label}</span>
-                      <span className={`inline-flex h-6 w-6 items-center justify-center rounded-md text-sm font-bold ${inclusions[key]
-                        ? 'bg-emerald-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-300'}`}>
-                        {inclusions[key] ? '✓' : '+'}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+                  return {
+                    ...item,
+                    isSelected,
+                    costLabel: meta.costLabel,
+                    costValue: Number(meta.costValue),
+                    timeMin: Number(meta.timeMin),
+                  };
+                });
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <button type="button" onClick={() => setCurrentStep(2)}
-                  className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Back</button>
-                <button type="button" onClick={() => setCurrentStep(4)}
-                  className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">Continue</button>
-              </div>
+                const validForCompare = modeCards.filter((card) => Number.isFinite(card.costValue) && card.costValue < Number.POSITIVE_INFINITY);
+                const cheapest = validForCompare.length
+                  ? validForCompare.reduce((best, card) => (card.costValue < best.costValue ? card : best), validForCompare[0])
+                  : null;
+                const fastest = modeCards.reduce((best, card) => (card.timeMin < best.timeMin ? card : best), modeCards[0]);
+
+                return (
+                  <div key={segment.key}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Segment {segmentIndex + 1}</p>
+                        <p className="text-lg font-semibold text-slate-100">
+                          {segment.from} <span className="px-1 text-amber-300">&rarr;</span> {segment.to}
+                        </p>
+                      </div>
+                      <p className="text-xs text-slate-500">~{segment.distanceKm} km</p>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      {modeCards.map((card) => (
+                        <button
+                          key={`${segment.key}-${card.key}`}
+                          type="button"
+                          onClick={() => selectSegmentMode(segment, card.key)}
+                          className={`relative rounded-xl border bg-slate-950/60 p-4 text-center transition hover:border-amber-300/40 ${card.isSelected ? 'border-2 border-amber-300/70 bg-amber-300/5' : 'border-slate-700'}`}
+                        >
+                          {fastest?.key === card.key ? (
+                            <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-blue-400/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">Fastest</span>
+                          ) : null}
+                          {cheapest?.key === card.key ? (
+                            <span className="absolute -top-2 right-2 whitespace-nowrap rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">Cheapest</span>
+                          ) : null}
+                          {modeIcon(card.key)}
+                          <p className="mt-2 text-xs font-medium text-slate-300">{card.label}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-100">
+                            {card.key === 'flight' && flightFares[segment.key]?.loading ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-500 border-t-cyan-300" />
+                                Fetching live fare...
+                              </span>
+                            ) : card.costLabel}
+                          </p>
+                          <p className="mt-0.5 text-xs text-slate-500">{formatDuration(card.timeMin)}</p>
+                        </button>
+                      ))}
+                    </div>
+
+                    {selected.mode === 'train' ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {['SL', '3A', '2A', '1A'].map((cls) => (
+                          <button
+                            key={`${segment.key}-${cls}`}
+                            type="button"
+                            onClick={() => selectTrainClass(segment, cls)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs transition ${selected.trainClass === cls ? 'border-amber-300/60 bg-amber-300/10 text-amber-200' : 'border-slate-700 text-slate-400'}`}
+                          >
+                            {cls}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {segmentIndex < routeSegments.length - 1 ? <div className="my-5 border-t border-slate-800" /> : null}
+                  </div>
+                );
+              })}
             </div>
-          </MotionSection>
 
-        /* ══════════════════════════════════════════════════════════════════
-            STEP 4 — Stay Preferences
-        ══════════════════════════════════════════════════════════════════ */
-        ) : currentStep === 4 ? (
-          <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
-            <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Stay Preferences</h2>
-            <p className="mt-2 text-sm text-slate-400">Select hotel comfort and room allocation before finalizing the route.</p>
-            <div className="mt-8 space-y-6">
+            <div className="mt-7 space-y-6">
               <div className="rounded-xl border border-amber-300/30 bg-slate-950/55 p-4">
-                <p className="mb-3 text-lg font-semibold text-slate-100">Hotel Type</p>
+                <p className="mb-3 text-lg font-semibold text-slate-100">Stay Preferences</p>
                 <div className="space-y-3">
                   {[['hotel3', '3-Stars'], ['hotel4', '4-Stars'], ['hotel5', '5-Stars']].map(([key, label]) => (
                     <button key={key} type="button" onClick={() => setStayPreferences((prev) => ({ ...prev, [key]: !prev[key] }))}
@@ -1108,23 +1457,31 @@ export default function AgentHomePage() {
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
-                <button type="button" onClick={() => setCurrentStep(3)}
+                <button type="button" onClick={() => setCurrentStep(2)}
                   className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Back</button>
-                <button type="button" onClick={() => setCurrentStep(5)}
-                  className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">View Final Route</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStayPreferences((prev) => ({ ...prev, segmentModes }));
+                    setCurrentStep(4);
+                  }}
+                  className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110"
+                >
+                  Continue to Final Route
+                </button>
               </div>
             </div>
           </MotionSection>
 
         /* ══════════════════════════════════════════════════════════════════
-            STEP 5 — Final Route (API place cards + Leaflet + Wikipedia photos)
+            STEP 4 — Final Route (API place cards + Leaflet + Wikipedia photos)
         ══════════════════════════════════════════════════════════════════ */
-        ) : currentStep === 5 ? (
+        ) : (
           <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
             className="rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Final Route</h2>
-              <button type="button" onClick={() => setCurrentStep(4)} className="text-lg font-medium text-amber-300 underline-offset-2 hover:underline">Edit Preferences</button>
+              <button type="button" onClick={() => setCurrentStep(3)} className="text-lg font-medium text-amber-300 underline-offset-2 hover:underline">Edit Journey Setup</button>
             </div>
 
             <div className="grid gap-5 lg:grid-cols-2">
@@ -1142,7 +1499,7 @@ export default function AgentHomePage() {
                     return (
                       <div key={`${label}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-950/45 px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <LocationPhoto placeName={label} className="h-10 w-14 shrink-0 rounded-lg" />
+                          <LocationPhoto placeName={label} searchHint={label} className="h-10 w-14 shrink-0 rounded-lg" />
                           <span className="h-3 w-3 shrink-0 rounded-full bg-amber-300" />
                           <span className="text-sm font-medium text-slate-100">{label}</span>
                           {isCore && <span className="text-[0.62rem] uppercase tracking-[0.16em] text-slate-500">Required</span>}
@@ -1160,7 +1517,7 @@ export default function AgentHomePage() {
                   <MapContainer center={routeMapPoints[0] ? [routeMapPoints[0].lat, routeMapPoints[0].lng] : [20, 0]} zoom={3} scrollWheelZoom className="h-full w-full z-10 custom-sea-blue-filter">
                     <TileLayer attribution='&copy; <a href="https://carto.com/">CartoDB</a>' url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
                     {routeMapPath.length > 1 && <Polyline positions={routeMapPath} pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }} />}
-                    {routeMapPoints.map((p) => <Marker key={p.name} position={[p.lat, p.lng]} />)}
+                    {routeMapPoints.map((p, index) => <Marker key={`${p.name || 'route-point'}-${index}`} position={[p.lat, p.lng]} />)}
                   </MapContainer>
                   <div className="absolute bottom-4 left-4 z-20 rounded border border-white/10 bg-black/60 p-2 px-4 text-[9px] font-mono text-cyan-400 backdrop-blur-md">Route_Map_View</div>
                 </div>
@@ -1178,20 +1535,6 @@ export default function AgentHomePage() {
                 <p className="mt-1 text-[0.65rem] uppercase tracking-[0.16em] text-emerald-300">{routeSourceLabel}</p>
               </div>
             </div>
-
-            {previewRouteList.length <= 2 && (
-              <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
-                No intermediate checkpoints were added, so Google Maps can only show the origin and destination.
-                Add route checkpoints to enable multi-waypoint optimization.
-              </div>
-            )}
-
-            {previewRouteList.length <= 2 && (
-              <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
-                No intermediate checkpoints were added, so the final route still shows only origin and destination.
-                Add checkpoints to let Google optimize a multi-stop route.
-              </div>
-            )}
 
             {/* Generated Place Blocks (doc-3) + Wikipedia photo fallback */}
             <section className="mt-5 rounded-2xl border border-slate-700/80 bg-slate-950/55 p-5">
@@ -1247,7 +1590,7 @@ export default function AgentHomePage() {
                               <img src={candidate.imageUrl} alt={candidate.name || 'Place image'}
                                 className="mt-2 h-44 w-full object-cover" loading="lazy" />
                             ) : (
-                              <LocationPhoto placeName={candidate.name} className="mt-2 h-44 w-full rounded-none" />
+                              <LocationPhoto placeName={candidate.name} searchHint={candidate.location} className="mt-2 h-44 w-full rounded-none" />
                             )}
 
                             <div className="p-3 pt-3">
@@ -1272,7 +1615,7 @@ export default function AgentHomePage() {
             </div>
 
             <div className="mt-4 flex justify-start">
-              <button type="button" onClick={() => setCurrentStep(4)}
+              <button type="button" onClick={() => setCurrentStep(3)}
                 className="text-sm font-medium text-slate-400 underline-offset-2 hover:text-slate-200 hover:underline">
                 Back to Stay Preferences
               </button>
@@ -1288,7 +1631,10 @@ export default function AgentHomePage() {
           <p className="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-center shadow-sm">Secure Payments</p>
         </footer>
       </div>
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/detective
       <style jsx>{`
         .custom-sea-blue-filter {
           filter: hue-rotate(170deg) saturate(1.8) brightness(0.9) contrast(1.1) !important;
