@@ -32,7 +32,6 @@ const generateAccessAndRefreshTokens = async (userId) => {
     if (!username) {
         throw new Error("Username is required");
       }
-
       if (!email) {
         throw new Error("Email is required");
       }

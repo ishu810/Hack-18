@@ -1,9 +1,27 @@
 import React, { useState } from 'react';
+<<<<<<< HEAD
 import {  Plane, Hotel, MapPin, AlertCircle, Navigation, ChevronDown, ChevronUp, X, ExternalLink } from 'lucide-react';
 
 const TravelAlerts = () => {
   const [openLeg, setOpenLeg] = useState(1);
   const [hoveredId, setHoveredId] = useState(null);
+=======
+import { Plane, Hotel, Navigation, ChevronDown, ChevronUp, X, ExternalLink, AlertCircle, CloudSun } from 'lucide-react';
+import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// Fix for default leaflet marker icons
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
+
+const TravelAlerts = () => {
+  const [openLeg, setOpenLeg] = useState(1);
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
   const [selectedCity, setSelectedCity] = useState(null);
 
   const itinerary = [
@@ -18,6 +36,10 @@ const TravelAlerts = () => {
       title: 'Departure', 
       location: 'Paris (CDG)',
       cityName: 'Paris',
+<<<<<<< HEAD
+=======
+      coords: [48.8566, 2.3522],
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
       route: 'Paris (CDG) → Helsinki (HEL)', 
       date: 'May 04',
       image: 'https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=400&q=80',
@@ -28,6 +50,10 @@ const TravelAlerts = () => {
       title: 'Layover', 
       location: 'Helsinki (HEL)',
       cityName: 'Helsinki',
+<<<<<<< HEAD
+=======
+      coords: [60.1699, 24.9384],
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
       route: 'Helsinki (HEL) → Tokyo (HND)', 
       date: 'May 05',
       image: 'https://images.unsplash.com/photo-1517154421773-0529f29ea451?auto=format&fit=crop&w=400&q=80',
@@ -38,6 +64,10 @@ const TravelAlerts = () => {
       title: 'Arrival', 
       location: 'Tokyo (HND)',
       cityName: 'Tokyo',
+<<<<<<< HEAD
+=======
+      coords: [35.6762, 139.6503],
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
       route: 'Tokyo (HND) → Seoul (ICN)', 
       date: 'May 08',
       image: 'https://images.unsplash.com/photo-1540959733332-eab4deabeeaf?auto=format&fit=crop&w=400&q=80',
@@ -45,15 +75,23 @@ const TravelAlerts = () => {
     },
   ];
 
+<<<<<<< HEAD
   const handleImageClick = (card) => {
     setSelectedCity(card);
   };
+=======
+  const routePath = bookingCards.map(card => card.coords);
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
 
   return (
     <div className="min-h-screen bg-[#0b0f1a] text-slate-300 p-6 font-sans flex flex-col gap-6 relative overflow-hidden">
       
       {/* SIDE PANEL */}
+<<<<<<< HEAD
       <div className={`fixed top-0 right-0 h-full w-full md:w-96 bg-[#111827] border-l border-slate-800 z-50 transform transition-transform duration-500 ease-in-out shadow-2xl ${selectedCity ? 'translate-x-0' : 'translate-x-full'}`}>
+=======
+      <div className={`fixed top-0 right-0 h-full w-full md:w-96 bg-[#111827] border-l border-slate-800 z-[2000] transform transition-transform duration-500 ease-in-out shadow-2xl ${selectedCity ? 'translate-x-0' : 'translate-x-full'}`}>
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
         {selectedCity && (
           <div className="p-6 flex flex-col h-full">
             <button onClick={() => setSelectedCity(null)} className="self-end p-2 hover:bg-slate-800 rounded-full mb-4">
@@ -64,10 +102,13 @@ const TravelAlerts = () => {
             <p className="text-blue-400 text-sm font-mono mb-4">{selectedCity.route}</p>
             <div className="space-y-4">
               <p className="text-slate-400 leading-relaxed">{selectedCity.desc}</p>
+<<<<<<< HEAD
               <div className="p-4 bg-[#0f172a] rounded-lg border border-slate-800">
                 <h4 className="text-[10px] uppercase font-bold text-slate-500 mb-2">Local Insight</h4>
                 <p className="text-xs italic">Current weather is favorable for sightseeing. Consider visiting local landmarks near {selectedCity.location}.</p>
               </div>
+=======
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
               <button className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold transition-all mt-auto">
                 <ExternalLink size={16} /> View Full Guide
               </button>
@@ -76,12 +117,16 @@ const TravelAlerts = () => {
         )}
       </div>
 
+<<<<<<< HEAD
       {/* BACKDROP */}
       {selectedCity && (
         <div className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm transition-opacity" onClick={() => setSelectedCity(null)} />
       )}
 
       {/* --- TOP BAR --- */}
+=======
+      {/* TOP BAR */}
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
       <div className="flex justify-between items-center">
         <h1 className="text-xl font-bold tracking-widest text-white uppercase">Travel Ops Dashboard</h1>
         <div className="flex gap-4">
@@ -90,14 +135,20 @@ const TravelAlerts = () => {
              <p className="text-2xl font-bold text-white">12,540 <span className="text-xs text-slate-500">KM</span></p>
           </div>
           <div className="bg-[#111827] border border-slate-800 p-3 px-6 rounded-lg min-w-[160px]">
+<<<<<<< HEAD
              <span className="text-[10px] text-slate-500 uppercase font-bold">Transit Time</span>
              <p className="text-2xl font-bold text-white">15h 40m</p>
+=======
+             <span className="text-[10px] text-slate-500 uppercase font-bold">Status</span>
+             <p className="text-xl font-bold text-emerald-400 flex items-center gap-2">● ACTIVE</p>
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-12 gap-6 flex-grow overflow-hidden">
         
+<<<<<<< HEAD
         {/* LEFT: MAP SECTION - UPDATED TO LIGHT BLUE */}
         <div className="col-span-12 lg:col-span-3 bg-[#0f172a] rounded-xl border border-slate-800 overflow-hidden relative group">
           <iframe
@@ -150,6 +201,49 @@ const TravelAlerts = () => {
                   >
                     <div className="text-left">
                       <span className="text-[9px] text-blue-500 font-bold uppercase tracking-tighter">{card.title}</span>
+=======
+        {/* LEFT: LEAFLET MAP (SEA BLUE COLOR) */}
+        <div className="col-span-12 lg:col-span-3 bg-[#0f172a] rounded-xl border border-slate-800 overflow-hidden relative">
+          <MapContainer 
+            center={[45, 70]} 
+            zoom={2} 
+            scrollWheelZoom={true}
+            className="h-full w-full z-10 custom-sea-blue-filter"
+          >
+            <TileLayer
+              attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
+              url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            />
+            <Polyline 
+              positions={routePath} 
+              pathOptions={{ color: '#0ea5e9', weight: 3, dashArray: '5, 10' }} 
+            />
+            {bookingCards.map((card) => (
+              <Marker 
+                key={card.id} 
+                position={card.coords}
+                eventHandlers={{ click: () => setSelectedCity(card) }}
+              />
+            ))}
+          </MapContainer>
+          <div className="absolute bottom-4 left-4 z-20 bg-black/60 backdrop-blur-md p-2 px-4 rounded border border-white/10 text-[9px] font-mono text-cyan-400">
+            Sector_Sea_View
+          </div>
+        </div>
+
+        {/* MIDDLE: BOOKING SECTION */}
+        <div className="col-span-12 lg:col-span-6 flex flex-col gap-4">
+          <div className="bg-[#0f172a] p-5 rounded-xl border border-slate-800 overflow-hidden flex flex-col h-full">
+            <h2 className="text-[11px] font-bold text-blue-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+              <Navigation size={14} /> Mission Itinerary / Route Legs
+            </h2>
+            <div className="space-y-3 overflow-y-auto pr-2 custom-scrollbar">
+              {bookingCards.map((card) => (
+                <div key={card.id} className="border border-slate-800 rounded-xl overflow-hidden bg-[#111827]">
+                  <button onClick={() => setOpenLeg(openLeg === card.id ? null : card.id)} className="w-full flex justify-between items-center p-4 hover:bg-slate-800/50 transition-colors">
+                    <div className="text-left">
+                      <span className="text-[9px] text-blue-500 font-bold uppercase">{card.title}</span>
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
                       <h3 className="text-lg font-bold text-white">{card.location}</h3>
                     </div>
                     <div className="flex items-center gap-4">
@@ -157,6 +251,7 @@ const TravelAlerts = () => {
                       {openLeg === card.id ? <ChevronUp size={20}/> : <ChevronDown size={20}/>}
                     </div>
                   </button>
+<<<<<<< HEAD
 
                   {openLeg === card.id && (
                     <div className="p-4 pt-0 border-t border-slate-800 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -188,6 +283,17 @@ const TravelAlerts = () => {
                           <button className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-blue-600 py-2 rounded-md text-[10px] font-bold uppercase transition-all">
                             <Hotel size={14} /> Book Hotel
                           </button>
+=======
+                  {openLeg === card.id && (
+                    <div className="p-4 pt-0 border-t border-slate-800">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                        <div className="h-32 rounded-lg overflow-hidden border border-slate-700">
+                          <img src={card.image} alt={card.location} className="w-full h-full object-cover saturate-50" />
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <button className="bg-slate-800 hover:bg-blue-600 py-2 rounded text-[10px] font-bold uppercase transition-all"><Plane size={14} className="inline mr-2"/> Flight</button>
+                          <button className="bg-slate-800 hover:bg-blue-600 py-2 rounded text-[10px] font-bold uppercase transition-all"><Hotel size={14} className="inline mr-2"/> Hotel</button>
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
                         </div>
                       </div>
                     </div>
@@ -227,6 +333,16 @@ const TravelAlerts = () => {
       <style jsx>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+<<<<<<< HEAD
+=======
+        
+        /* Updated for Sea Blue (Cyan) effect */
+        .custom-sea-blue-filter { 
+          filter: hue-rotate(170deg) saturate(1.8) brightness(0.9) contrast(1.1) !important;
+        }
+        
+        .leaflet-container { background: #070a0d !important; }
+>>>>>>> a3521c225f8db07b1983fac30495c8ec7b2be56e
       `}</style>
     </div>
   );

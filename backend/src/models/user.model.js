@@ -63,7 +63,7 @@ const userSchema = new mongoose.Schema(
       default: "local",
     },
     googleId: {
-      type: String, // "sub" from Google token
+      type: String, 
       index: true,
     },
     weight: {

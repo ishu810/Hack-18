@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   CloudLightning, Droplets, Eye, CloudRain, Thermometer, 
-  Sun, Moon, MapPin, AlertTriangle, Wind, Plane, Cloud, Search,
+  Sun, Moon, MapPin, AlertTriangle, Wind, Sunrise, 
+  Sunset, Plane, Umbrella, Cloud, 
   
   Globe,
 } from 'lucide-react';
