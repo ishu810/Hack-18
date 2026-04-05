@@ -3,7 +3,7 @@ import {
   createTrip,
   generatePlaces,
   selectPlaces,
-  optimizeRoutePreview,
+
   generateItinerary,
 
   computeRoute,
@@ -17,7 +17,7 @@ const router = Router();
 router.use(verifyJWT);
 
 router.post('/create', createTrip);
-router.post('/optimize-preview', optimizeRoutePreview);
+
 router.post('/route/compute', computeRoute);
 router.post('/flight-cost', getFlightCost);
 router.get('/:tripId/budget', estimateBudget);

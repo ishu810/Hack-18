@@ -917,6 +917,28 @@ export default function ItineraryPlannerPage() {
 
     return withCoords.length ? withCoords : routeCheckpointPlaces;
   }, [activeDayMapPlaces, routeCheckpointPlaces]);
+
+  const generatedRoutePlan = useMemo(() => {
+    const checkpoints = (activeDayRoutePlaces || []).map((place, index) => ({
+      index,
+      name: place?.name || `Stop ${index + 1}`,
+      location: place?.location || activeDay?.city || '',
+    }));
+
+    const totals = (routeSegments || []).reduce((accumulator, segment) => {
+      accumulator.distanceMeters += Number(segment?.distanceMeters || 0);
+      accumulator.estimatedMinutes += Number(segment?.estimatedMinutes || segment?.durationMinutes || 0);
+      return accumulator;
+    }, { distanceMeters: 0, estimatedMinutes: 0 });
+
+    return {
+      checkpoints,
+      distanceMeters: totals.distanceMeters,
+      estimatedMinutes: totals.estimatedMinutes,
+      segmentCount: routeSegments.length,
+    };
+  }, [activeDay?.city, activeDayRoutePlaces, routeSegments]);
+
   const activeDayPlaceNames = activeDayRoutePlaces.map((place) => place?.name).filter(Boolean);
 
   if (!journey || !itineraryBundle) {
@@ -996,6 +1018,25 @@ export default function ItineraryPlannerPage() {
               ) : (
                 <p className="text-xs text-slate-500">Click the line connecting two places to see the distance and average travel time.</p>
               )}
+              {generatedRoutePlan.checkpoints.length ? (
+                <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-50">
+                  <p className="text-[11px] uppercase tracking-[0.16em] text-cyan-200">Generated Route Plan</p>
+                  <div className="mt-2 flex flex-wrap gap-3 text-xs text-cyan-100/90">
+                    <span>{generatedRoutePlan.checkpoints.length} checkpoints</span>
+                    <span>{generatedRoutePlan.segmentCount} route segments</span>
+                    <span>Distance: {generatedRoutePlan.distanceMeters > 0 ? formatDistance(generatedRoutePlan.distanceMeters) : 'N/A'}</span>
+                    <span>Est. time: {generatedRoutePlan.estimatedMinutes > 0 ? formatMinutes(generatedRoutePlan.estimatedMinutes) : 'N/A'}</span>
+                  </div>
+                  <ol className="mt-3 space-y-1 text-xs text-cyan-50/90">
+                    {generatedRoutePlan.checkpoints.map((checkpoint) => (
+                      <li key={`${checkpoint.name}-${checkpoint.index}`} className="rounded border border-cyan-300/15 bg-slate-950/40 px-2 py-1.5">
+                        <span className="font-semibold text-cyan-100">{checkpoint.index + 1}.</span> {checkpoint.name}
+                        {checkpoint.location ? <span className="text-cyan-100/70"> · {checkpoint.location}</span> : null}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
               <div className="mt-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Mapped Stops</p>
                 <ul className="mt-2 space-y-2 text-sm text-slate-300">
@@ -1190,12 +1231,17 @@ export default function ItineraryPlannerPage() {
         </section>
 
         <div className="mt-6 flex flex-wrap gap-3">
-          <Link
-            to="/agent-home"
+          <button
+            type="button"
+            onClick={() => {
+              setOpenAdvisoryDayIndex(null);
+              closeVenueDrawer();
+              navigate('/agent-home');
+            }}
             className="rounded-xl border border-slate-600 bg-slate-900/70 px-4 py-2 text-sm text-slate-200 transition hover:bg-slate-800"
           >
-            Back to Planner
-          </Link>
+            Back to Agent Home
+          </button>
           <Link
             to="/weather-dashboard"
             className="rounded-xl border border-cyan-400/40 bg-cyan-500/20 px-4 py-2 text-sm text-cyan-100 transition hover:bg-cyan-500/30"

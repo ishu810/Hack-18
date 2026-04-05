@@ -356,6 +356,58 @@ const buildRouteCitySequence = (trip = {}) => {
   return sequence;
 };
 
+const buildOptimizedRouteCitySequence = async (trip = {}) => {
+  const fallbackSequence = buildRouteCitySequence(trip);
+  if (fallbackSequence.length < 2) return fallbackSequence;
+
+  const checkpointWaypoints = [];
+  for (const city of fallbackSequence) {
+    try {
+      const center = await geocodeWithGeoapify(city);
+      if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) continue;
+      checkpointWaypoints.push({
+        name: city,
+        label: city,
+        location: city,
+        lat: Number(center.lat),
+        lng: Number(center.lng),
+      });
+    } catch (error) {
+      console.warn(`Route checkpoint geocode failed for ${city}:`, error?.message || error);
+    }
+  }
+
+  if (checkpointWaypoints.length < 2) return fallbackSequence;
+
+  try {
+    const optimized = await computeRouteService({
+      waypoints: checkpointWaypoints,
+      mode: 'drive',
+      options: { optimizeWaypoints: true },
+    });
+
+    const routeCheckpoints = optimized?.route?.checkpoints;
+    if (Array.isArray(routeCheckpoints) && routeCheckpoints.length >= 2) {
+      const ordered = routeCheckpoints
+        .map((point) => String(point?.name || point?.label || point?.location || '').trim())
+        .filter(Boolean);
+      if (ordered.length >= 2) return ordered;
+    }
+
+    const waypointOrder = Array.isArray(optimized?.route?.waypointOrder) ? optimized.route.waypointOrder : [];
+    if (waypointOrder.length) {
+      const intermediateCities = fallbackSequence.slice(0, -1);
+      const orderedStops = waypointOrder.map((index) => intermediateCities[index]).filter(Boolean);
+      const destination = fallbackSequence[fallbackSequence.length - 1];
+      return [...orderedStops, destination].filter(Boolean);
+    }
+  } catch (error) {
+    console.warn('Google route optimization fallback:', error?.message || error);
+  }
+
+  return fallbackSequence;
+};
+
 const normalizePlaceName = (value = '') => value
   .toLowerCase()
   .replace(/[^a-z0-9\s]/g, ' ')
@@ -1509,7 +1561,7 @@ const ensureInterCityTransitData = async ({ itineraryBundle, origin = '' }) => {
 };
 
 const createTrip = asyncHandler(async (req, res) => {
-  const { origin, destination, stops, budget, dates, stayPreferences } = req.body;
+  const { origin, destination, stops, budget, dates, stayPreferences, selectedExperiences } = req.body;
   const userId = req.user?._id || null; 
 
   const trip = await Travel.create({
@@ -1520,6 +1572,7 @@ const createTrip = asyncHandler(async (req, res) => {
     budget,
     dates,
     stayPreferences: stayPreferences || {},
+    selectedExperiences: Array.isArray(selectedExperiences) ? selectedExperiences : [],
   });
 
   res.status(201).json({
@@ -1813,194 +1866,6 @@ const selectPlaces = asyncHandler(async (req, res) => {
 });
 
 // Generate itinerary
-// 🌍 Google Maps: Get Route Info (supports waypoints for one-call optimization)
-const getGoogleRoute = async (origin, destination, waypoints = []) => {
-  try {
-    const cleanWaypoints = Array.isArray(waypoints)
-      ? waypoints.map((point) => String(point || '').trim()).filter(Boolean)
-      : [];
-
-    const res = await axios.get(
-      "https://maps.googleapis.com/maps/api/directions/json",
-      {
-        params: {
-          origin,
-          destination,
-          ...(cleanWaypoints.length > 0 ? { waypoints: `optimize:true|${cleanWaypoints.join('|')}` } : {}),
-          key: process.env.GOOGLE_MAPS_API_KEY
-        }
-      }
-    );
-
-    console.log('🗺️ Google Maps Directions status:', res.data?.status || 'unknown');
-    console.log('🗺️ Google Maps route count:', Array.isArray(res.data?.routes) ? res.data.routes.length : 0);
-
-    if (res.data?.status !== 'OK') {
-      console.warn('⚠️ Google Maps Directions returned non-OK response:', {
-        status: res.data?.status,
-        error_message: res.data?.error_message
-      });
-      return null;
-    }
-
-    const route = res.data.routes?.[0];
-    const legs = route?.legs || [];
-
-    if (!legs.length) {
-      console.warn('⚠️ Google Maps route path failed: no route legs returned');
-      return null;
-    }
-
-    const firstLeg = legs[0];
-    const totalDistanceMeters = legs.reduce((sum, leg) => sum + Number(leg?.distance?.value || 0), 0);
-    const totalDurationSeconds = legs.reduce((sum, leg) => sum + Number(leg?.duration?.value || 0), 0);
-    const waypointOrder = Array.isArray(route?.waypoint_order) ? route.waypoint_order : [];
-    const orderedWaypoints = waypointOrder.length > 0
-      ? waypointOrder.map((index) => cleanWaypoints[index]).filter(Boolean)
-      : cleanWaypoints;
-
-    const formatKm = (meters) => `${(meters / 1000).toFixed(1)} km`;
-    const formatDuration = (seconds) => {
-      const hrs = Math.floor(seconds / 3600);
-      const mins = Math.round((seconds % 3600) / 60);
-      if (hrs <= 0) return `${mins} min`;
-      if (mins <= 0) return `${hrs} hr`;
-      return `${hrs} hr ${mins} min`;
-    };
-
-    return {
-      distance: formatKm(totalDistanceMeters),
-      duration: formatDuration(totalDurationSeconds),
-      totalDistance: formatKm(totalDistanceMeters),
-      totalDuration: formatDuration(totalDurationSeconds),
-      firstLegDistance: firstLeg?.distance?.text || '',
-      firstLegDuration: firstLeg?.duration?.text || '',
-      waypointOrder,
-      orderedStops: [origin, ...orderedWaypoints, destination].filter(Boolean),
-      legs: legs.map((leg) => ({
-        from: leg?.start_address || '',
-        to: leg?.end_address || '',
-        distance: leg?.distance?.text || '',
-        duration: leg?.duration?.text || '',
-      })),
-    };
-  } catch (err) {
-    console.error('❌ Google Maps route path failed:', err.message);
-    if (err?.response?.data) {
-      console.error('❌ Google Maps response body:', err.response.data);
-    }
-    return null;
-  }
-};
-
-const normalizeRouteLabel = (value) => String(value || '')
-  .trim()
-  .toLowerCase();
-
-const orderPlacesByRoutePlan = (places, orderedStops = []) => {
-  if (!Array.isArray(places) || places.length === 0) return [];
-  if (!Array.isArray(orderedStops) || orderedStops.length === 0) return places;
-
-  const entries = places.map((place, index) => ({
-    place,
-    index,
-    labels: [place?.location, place?.name]
-      .map(normalizeRouteLabel)
-      .filter(Boolean)
-  }));
-
-  const used = new Set();
-  const ordered = [];
-
-  for (const stop of orderedStops) {
-    const normalizedStop = normalizeRouteLabel(stop);
-    if (!normalizedStop) continue;
-
-    const match = entries.find(({ index, labels }) => {
-      if (used.has(index)) return false;
-      return labels.some((label) => label === normalizedStop || normalizedStop.includes(label) || label.includes(normalizedStop));
-    });
-
-    if (match) {
-      used.add(match.index);
-      ordered.push(match.place);
-    }
-  }
-
-  places.forEach((place, index) => {
-    if (!used.has(index)) ordered.push(place);
-  });
-
-  return ordered;
-};
-
-const buildRoutePlanForPrompt = (routePlan) => {
-  if (!routePlan) return null;
-
-  return {
-    ordered_stops: routePlan.orderedStops || [],
-    total_distance: routePlan.totalDistance || '',
-    total_duration: routePlan.totalDuration || '',
-    legs: Array.isArray(routePlan.legs)
-      ? routePlan.legs.map((leg) => ({
-        from: leg.from,
-        to: leg.to,
-        distance: leg.distance,
-        duration: leg.duration,
-      }))
-      : []
-  };
-};
-
-const optimizeRoutePreview = asyncHandler(async (req, res) => {
-  const { origin, destination, stops } = req.body || {};
-
-  const originName = String(origin || '').trim();
-  const destinationName = String(destination || '').trim();
-
-  if (!originName || !destinationName) {
-    return res.status(400).json({
-      success: false,
-      message: 'Origin and destination are required for route optimization.'
-    });
-  }
-
-  const routeStopNames = (Array.isArray(stops) ? stops : [])
-    .map((stop) => {
-      if (typeof stop === 'string') return stop;
-      if (stop && typeof stop === 'object') return stop.location || stop.name || '';
-      return '';
-    })
-    .map((name) => String(name || '').trim())
-    .filter(Boolean)
-    .filter((name, index, arr) => arr.findIndex((v) => v.toLowerCase() === name.toLowerCase()) === index)
-    .filter((name) => {
-      const lower = name.toLowerCase();
-      return lower !== originName.toLowerCase() && lower !== destinationName.toLowerCase();
-    });
-
-  const routePlan = await getGoogleRoute(originName, destinationName, routeStopNames);
-
-  if (!routePlan) {
-    return res.status(502).json({
-      success: false,
-      message: 'Google Maps could not optimize this route right now.'
-    });
-  }
-
-  return res.json({
-    success: true,
-    route_source: 'google_maps',
-    route_overview: {
-      total_distance: routePlan.totalDistance,
-      total_duration: routePlan.totalDuration,
-      ordered_stops: routePlan.orderedStops,
-      legs: routePlan.legs,
-      waypoint_order: routePlan.waypointOrder,
-    }
-  });
-});
-
 const generateItinerary = asyncHandler(async (req, res) => {
   const { tripId } = req.params;
 
@@ -2040,7 +1905,8 @@ const generateItinerary = asyncHandler(async (req, res) => {
 
   console.log('✅ Trip status is valid (places_selected)');
   const tripDays = getTripDaysFromDates(trip.dates);
-  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays, buildRouteCitySequence(trip));
+  const optimizedRouteCities = await buildOptimizedRouteCitySequence(trip);
+  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays, optimizedRouteCities);
   const weatherByDay = await buildWeatherByDayInput({
     groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
     tripDates: trip.dates,
@@ -2057,25 +1923,6 @@ const generateItinerary = asyncHandler(async (req, res) => {
     rain: item.daily_chance_of_rain
   })));
 
-  const routeWaypoints = trip.selectedPlaces
-    .map((place) => place.location || place.name)
-    .filter(Boolean);
-
-  const routePlan = await getGoogleRoute(
-    trip.origin,
-    trip.destination,
-    routeWaypoints
-  );
-
-  console.log(routePlan
-    ? '✅ Route path worked: Google Maps optimized directions were used'
-    : '⚠️ Route path fallback: Google Maps directions were unavailable');
-
-  const orderedSelectedPlaces = orderPlacesByRoutePlan(
-    trip.selectedPlaces,
-    routePlan?.orderedStops?.slice(1, -1) || []
-  );
-
   const prompt = buildItineraryPrompt({
     origin: trip.origin,
     destination: trip.destination,
@@ -2084,8 +1931,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
     groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
     weatherByDay,
     budget: trip.budget,
-    dates: trip.dates,
-    routePlan: buildRoutePlanForPrompt(routePlan)
+    dates: trip.dates
   });
 
   console.log('✅ Prompt built, length:', prompt.length, 'characters');
@@ -2102,7 +1948,6 @@ const generateItinerary = asyncHandler(async (req, res) => {
     itineraryData = await parseItineraryJsonSafely(content);
     console.log('✅ Response parsed successfully');
     console.log('📊 Itinerary days:', itineraryData.itinerary?.length);
-    console.log('✅ Itinerary path worked: LLM response used');
   } catch (error) {
     console.warn('⚠️ LLM generation failed:', error.message);
     console.log('📝 Using fallback itinerary...');
@@ -2152,10 +1997,9 @@ const generateItinerary = asyncHandler(async (req, res) => {
           travel: isTransferDay ? {
             from: previousCity,
             to: currentCity,
-            duration: legRoute?.duration || 'N/A',
-            distance: legRoute?.distance || 'N/A',
+            duration: '3-6 hours',
             mode: 'car',
-            note: 'Best available route via Google Maps',
+            note: `Travel from ${previousCity} to ${currentCity} first, then start sightseeing.`
           } : null,
           food: [
             {
@@ -2189,11 +2033,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
             ? `Traveled from ${previousCity} to ${currentCity}, then explored nearby attractions.`
             : `Explored nearby attractions around ${currentCity}.`
         };
-      })
-    );
-
-    itineraryData = {
-      itinerary: itineraryDays,
+      }),
       total_estimated_cost: trip.budget,
       packing_tips: [
         'Light, breathable clothing',
@@ -2201,12 +2041,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
         'Sun protection',
         'Power bank'
       ],
-      best_time_to_visit: 'Check weather forecast before the trip',
-      route_overview: routePlan ? {
-        total_distance: routePlan.totalDistance,
-        total_duration: routePlan.totalDuration,
-        ordered_stops: routePlan.orderedStops,
-      } : null,
+      best_time_to_visit: 'Check weather forecast before the trip'
     };
   }
 
@@ -2513,9 +2348,7 @@ export {
   createTrip,
   generatePlaces,
   selectPlaces,
-  optimizeRoutePreview,
-  generateItinerary
-
+  generateItinerary,
   computeRoute,
   getFlightCost,
   estimateBudget,

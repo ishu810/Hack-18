@@ -318,3 +318,48 @@ export async function fetchGoogleVenueRecommendations({ lat, lng, city = '', bud
     dining_places: diningPlaces,
   };
 }
+
+export async function fetchGoogleCheckpointSuggestions({ lat, lng, city = '', maxResults = 4 }) {
+  const key = getGooglePlacesKey();
+  if (!key || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+
+  const safeMax = Math.max(1, Math.min(10, Number(maxResults) || 4));
+  const radius = Number(process.env.GOOGLE_CHECKPOINT_SEARCH_RADIUS_METERS || 22000);
+
+  const [attractions, landmarks] = await Promise.all([
+    googleNearbySearch({
+      lat,
+      lng,
+      radius,
+      type: 'tourist_attraction',
+      keyword: `${city || ''} famous attraction`.trim(),
+      maxResults: Math.max(8, safeMax * 2),
+      venueKind: 'checkpoint',
+      budget: 0,
+    }),
+    googleNearbySearch({
+      lat,
+      lng,
+      radius,
+      type: '',
+      keyword: `${city || ''} famous landmark`.trim(),
+      maxResults: Math.max(8, safeMax * 2),
+      venueKind: 'checkpoint',
+      budget: 0,
+    }),
+  ]);
+
+  const ranked = dedupePlaces([...(attractions || []), ...(landmarks || [])])
+    .filter((place) => {
+      const rating = Number(place?.rating || 0);
+      const reviews = Number(place?.user_ratings_total || 0);
+      return rating >= 4.2 && reviews >= 200;
+    })
+    .sort((left, right) => {
+      const leftScore = (Number(left?.rating || 0) * 100) + Math.log10((Number(left?.user_ratings_total || 0) + 1)) * 60;
+      const rightScore = (Number(right?.rating || 0) * 100) + Math.log10((Number(right?.user_ratings_total || 0) + 1)) * 60;
+      return rightScore - leftScore;
+    });
+
+  return ranked.slice(0, safeMax);
+}
