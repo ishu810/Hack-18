@@ -80,6 +80,7 @@ Generate a structured itinerary with EXACTLY ${tripDays} days. For each day, inc
 12) Summary: 1 line summarizing the day
 
 MANDATORY SEQUENCING RULES (VERY IMPORTANT):
+- Follow the ROUTE PLAN order when it is available.
 - If day city is different from previous day city, travel MUST be present and explicit.
 - Write travel clearly as: from: "Previous City", to: "Current City".
 - On transfer days, first activity title MUST start with: "After reaching <Current City>, ...".

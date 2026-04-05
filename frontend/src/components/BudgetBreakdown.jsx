@@ -27,9 +27,7 @@ export default function BudgetBreakdown({ budgetData, loading, error, totalBudge
           <p className="text-xs uppercase tracking-[0.18em] text-amber-300">Budget Ops</p>
           <h2 className="mt-1 text-lg font-semibold text-slate-100">Travel budget breakdown</h2>
         </div>
-        <div className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] ${health > 100 ? 'bg-rose-500/10 text-rose-200' : 'bg-emerald-500/10 text-emerald-200'}`}>
-          {health ? `${health}% planned` : 'Plan ready'}
-        </div>
+       
       </div>
 
       {loading ? (

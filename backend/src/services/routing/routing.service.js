@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { TTLCache } from '../../utils/ttlCache.js';
+import { computeRouteWithGoogle } from './providers/googleRoutingAdapter.js';
 import { computeRouteWithGeoapify } from './providers/geoapifyRoutingAdapter.js';
 
 const routeCache = new TTLCache({ ttlMs: 5 * 60 * 1000, maxEntries: 800 });
@@ -14,6 +15,8 @@ function normalizeWaypoints(waypoints = []) {
     .map((point) => ({
       lat: toFiniteNumber(point?.lat),
       lng: toFiniteNumber(point?.lng ?? point?.lon),
+      name: String(point?.name || point?.label || '').trim(),
+      location: String(point?.location || '').trim(),
     }))
     .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
 }
@@ -28,10 +31,11 @@ function dedupeConsecutiveWaypoints(waypoints = []) {
   return deduped;
 }
 
-function buildRouteHash({ waypoints, mode = 'drive', provider = 'geoapify' }) {
+function buildRouteHash({ waypoints, mode = 'drive', provider = 'geoapify', optimizeWaypoints = true }) {
   const signature = {
     provider,
     mode,
+    optimizeWaypoints: Boolean(optimizeWaypoints),
     waypoints: waypoints.map((point) => [Number(point.lat.toFixed(6)), Number(point.lng.toFixed(6))]),
   };
 
@@ -42,20 +46,18 @@ function buildRouteHash({ waypoints, mode = 'drive', provider = 'geoapify' }) {
 }
 
 function getProviderName() {
-  const candidate = String(process.env.ROUTING_PROVIDER || 'geoapify').toLowerCase().trim();
+  const candidate = String(process.env.ROUTING_PROVIDER || '').toLowerCase().trim();
+  const hasGoogleKey = Boolean(String(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '').trim());
   if (candidate === 'google') return 'google';
+  if (!candidate && hasGoogleKey) return 'google';
+  if (candidate === 'geoapify') return 'geoapify';
+  if (hasGoogleKey) return 'google';
   return 'geoapify';
 }
 
 async function runProvider(provider, payload) {
   if (provider === 'google') {
-    return {
-      ok: false,
-      error: {
-        code: 'PROVIDER_NOT_CONFIGURED',
-        message: 'Google routing provider is not configured in this build.',
-      },
-    };
+    return computeRouteWithGoogle(payload);
   }
 
   return computeRouteWithGeoapify(payload);
@@ -63,6 +65,7 @@ async function runProvider(provider, payload) {
 
 export async function computeRoute({ waypoints = [], mode = 'drive', options = {} }) {
   const normalized = dedupeConsecutiveWaypoints(normalizeWaypoints(waypoints));
+  const optimizeWaypoints = options?.optimizeWaypoints !== false;
 
   if (normalized.length < 2) {
     return {
@@ -82,7 +85,7 @@ export async function computeRoute({ waypoints = [], mode = 'drive', options = {
   }
 
   const provider = getProviderName();
-  const hash = buildRouteHash({ waypoints: normalized, mode, provider });
+  const hash = buildRouteHash({ waypoints: normalized, mode, provider, optimizeWaypoints });
   const cached = routeCache.get(hash);
 
   if (cached) {
@@ -94,7 +97,7 @@ export async function computeRoute({ waypoints = [], mode = 'drive', options = {
     };
   }
 
-  const result = await runProvider(provider, { waypoints: normalized, mode, options });
+  const result = await runProvider(provider, { waypoints: normalized, mode, options: { ...options, optimizeWaypoints } });
   if (!result?.ok) {
     return {
       ok: false,

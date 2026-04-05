@@ -7,6 +7,14 @@ import cors from "cors";
 
 const app=express();
 
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    console.log(`[API] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now() - startedAt}ms)`);
+  });
+  next();
+});
+
 
 app.use(cookieParser());
 app.use(express.json());
@@ -34,7 +42,7 @@ app.use(cors({
 import userAuthRouter from "./routes/auth.route.js"
 import userRouter from "./routes/user.route.js"
 import travelRouter from "./routes/travel.route.js"
-
+// import history from "./routes/trip.route.js"
 
 
 
@@ -43,6 +51,7 @@ import travelRouter from "./routes/travel.route.js"
 app.use("/api/auth",userAuthRouter)
 app.use("/api/user",userRouter)
 app.use("/api/travel", travelRouter)
+// app.use("/api", history)
 
 
 

@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import AuthButton from '../components/auth/AuthButton';
 import AuthInput from '../components/auth/AuthInput';
 import AuthLayout from '../components/auth/AuthLayout';
-import { loginUser } from '../api';
+import { getGoogleAuthUrl, loginUser } from '../api';
 
 const MotionForm = motion.form;
 
@@ -17,6 +17,10 @@ export default function LoginPage() {
   const updateField = (event) => {
     const { name, value } = event.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleGoogleAuth = () => {
+    window.location.href = getGoogleAuthUrl();
   };
 
   const handleSubmit = async (event) => {
@@ -90,6 +94,23 @@ export default function LoginPage() {
         {error ? <p className="text-sm text-red-300">{error}</p> : null}
 
         <AuthButton label="Enter System" loading={loading} />
+
+        <div className="pt-2">
+          <div className="relative my-3">
+            <div className="h-px w-full bg-slate-600/60" />
+            <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900/80 px-2 text-xs uppercase tracking-[0.18em] text-slate-400">
+              Or
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleGoogleAuth}
+            className="w-full rounded-lg border border-slate-500/60 bg-slate-900/70 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:border-slate-300 hover:bg-slate-800"
+          >
+            Continue with Google
+          </button>
+        </div>
       </MotionForm>
     </AuthLayout>
   );

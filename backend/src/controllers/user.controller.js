@@ -27,7 +27,6 @@ const generateAccessAndRefreshTokens = async (userId) => {
 
   const registerUser=asyncHandler(async (req ,res)=>{
     const {username,email,role,password}=req.body;
-    const normalizedRole = role || "ranger";
 
 
     if (!username) {
@@ -39,6 +38,10 @@ const generateAccessAndRefreshTokens = async (userId) => {
       
       if (!password) {
         throw new Error("Password is required");
+      }
+      
+      if (!role) {
+        throw new Error("Role is required");
       }
       
       const existedUser = await User.findOne({
@@ -53,7 +56,7 @@ const generateAccessAndRefreshTokens = async (userId) => {
         email: email.trim().toLowerCase(),
         fullname: username.trim().toLowerCase(),
 
-        role: normalizedRole,
+        role,
         password: password,
         provider: "local",
         isProfileComplete: true,
@@ -115,8 +118,7 @@ const loginUser = asyncHandler(async (req, res) => {
     // cookie options
     const options = {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax"
+      secure: true, 
     };
   
     return res
@@ -144,8 +146,7 @@ const loginUser = asyncHandler(async (req, res) => {
   
     const options = {
       httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax"
+      secure: true
     };
   
     return res
@@ -158,15 +159,4 @@ const loginUser = asyncHandler(async (req, res) => {
       });
   });
 
-  const getCurrentUser = asyncHandler(async (req, res) => {
-    if (!req.user) {
-      return res.status(401).json({ success: false, message: "Unauthorized" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      user: req.user
-    });
-  });
-
-  export {registerUser,loginUser,logoutUser,getCurrentUser}
+  export {registerUser,loginUser,logoutUser}

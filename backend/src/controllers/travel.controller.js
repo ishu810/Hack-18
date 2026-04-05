@@ -385,6 +385,58 @@ const buildRouteCitySequence = (trip = {}) => {
   return sequence;
 };
 
+const buildOptimizedRouteCitySequence = async (trip = {}) => {
+  const fallbackSequence = buildRouteCitySequence(trip);
+  if (fallbackSequence.length < 2) return fallbackSequence;
+
+  const checkpointWaypoints = [];
+  for (const city of fallbackSequence) {
+    try {
+      const center = await geocodeWithGeoapify(city);
+      if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) continue;
+      checkpointWaypoints.push({
+        name: city,
+        label: city,
+        location: city,
+        lat: Number(center.lat),
+        lng: Number(center.lng),
+      });
+    } catch (error) {
+      console.warn(`Route checkpoint geocode failed for ${city}:`, error?.message || error);
+    }
+  }
+
+  if (checkpointWaypoints.length < 2) return fallbackSequence;
+
+  try {
+    const optimized = await computeRouteService({
+      waypoints: checkpointWaypoints,
+      mode: 'drive',
+      options: { optimizeWaypoints: true },
+    });
+
+    const routeCheckpoints = optimized?.route?.checkpoints;
+    if (Array.isArray(routeCheckpoints) && routeCheckpoints.length >= 2) {
+      const ordered = routeCheckpoints
+        .map((point) => String(point?.name || point?.label || point?.location || '').trim())
+        .filter(Boolean);
+      if (ordered.length >= 2) return ordered;
+    }
+
+    const waypointOrder = Array.isArray(optimized?.route?.waypointOrder) ? optimized.route.waypointOrder : [];
+    if (waypointOrder.length) {
+      const intermediateCities = fallbackSequence.slice(0, -1);
+      const orderedStops = waypointOrder.map((index) => intermediateCities[index]).filter(Boolean);
+      const destination = fallbackSequence[fallbackSequence.length - 1];
+      return [...orderedStops, destination].filter(Boolean);
+    }
+  } catch (error) {
+    console.warn('Google route optimization fallback:', error?.message || error);
+  }
+
+  return fallbackSequence;
+};
+
 const normalizePlaceName = (value = '') => value
   .toLowerCase()
   .replace(/[^a-z0-9\s]/g, ' ')
@@ -1590,7 +1642,7 @@ const applySelectedInterCityModes = ({ itineraryBundle, segmentModes = {} }) => 
 };
 
 const createTrip = asyncHandler(async (req, res) => {
-  const { origin, destination, stops, budget, dates, stayPreferences } = req.body;
+  const { origin, destination, stops, budget, dates, stayPreferences, selectedExperiences } = req.body;
   const userId = req.user?._id || null; 
 
   const trip = await Travel.create({
@@ -1601,6 +1653,7 @@ const createTrip = asyncHandler(async (req, res) => {
     budget,
     dates,
     stayPreferences: stayPreferences || {},
+    selectedExperiences: Array.isArray(selectedExperiences) ? selectedExperiences : [],
   });
 
   res.status(201).json({
@@ -1936,7 +1989,8 @@ const generateItinerary = asyncHandler(async (req, res) => {
 
   console.log('✅ Trip status is valid (places_selected)');
   const tripDays = getTripDaysFromDates(trip.dates);
-  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays, buildRouteCitySequence(trip));
+  const optimizedRouteCities = await buildOptimizedRouteCitySequence(trip);
+  const groupedPlan = buildNearbyDayGrouping(trip.selectedPlaces || [], tripDays, optimizedRouteCities);
   const weatherByDay = await buildWeatherByDayInput({
     groupedPlacesByDay: groupedPlan.groupedPlacesByDay,
     tripDates: trip.dates,

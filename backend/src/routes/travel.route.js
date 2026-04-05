@@ -3,7 +3,9 @@ import {
   createTrip,
   generatePlaces,
   selectPlaces,
+
   generateItinerary,
+
   computeRoute,
   getFlightCost,
   getTransportCost,
@@ -16,6 +18,7 @@ const router = Router();
 router.use(verifyJWT);
 
 router.post('/create', createTrip);
+
 router.post('/route/compute', computeRoute);
 router.post('/flight-cost', getFlightCost);
 router.post('/transport-cost', getTransportCost);

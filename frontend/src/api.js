@@ -1,5 +1,9 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
+export function getGoogleAuthUrl() {
+  return `${API_BASE_URL}/api/auth/google`;
+}
+
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     credentials: 'include',
@@ -41,12 +45,6 @@ export function registerUser(payload) {
 export function logoutUser() {
   return apiRequest('/api/user/logout', {
     method: 'POST',
-  });
-}
-
-export function getCurrentUser() {
-  return apiRequest('/api/user/me', {
-    method: 'GET',
   });
 }
 
