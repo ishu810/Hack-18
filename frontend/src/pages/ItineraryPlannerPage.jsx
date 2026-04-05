@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { computeRoute } from '../api';
+import { computeRoute, fetchBudgetEstimate } from '../api';
+import BudgetBreakdown from '../components/BudgetBreakdown';
 import PlacesMap from '../components/PlacesMap';
 import { optimizeDayPlaces } from '../utils/dayRouteOptimizer';
 import { buildRouteMetrics, formatDistance } from '../utils/routeMath';
@@ -118,6 +119,15 @@ function formatTransit(travel) {
   return `${travel.from} -> ${travel.to}${mode}${duration}`;
 }
 
+function formatCurrency(value) {
+  const amount = Number(value || 0);
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Number.isFinite(amount) ? amount : 0);
+}
+
 function formatMinutes(minutes = 0) {
   const rounded = Math.max(1, Math.round(Number(minutes) || 0));
   if (rounded >= 60) {
@@ -134,6 +144,87 @@ function getSegmentTransitLabel(segment) {
   const timeLabel = minutes > 0 ? formatMinutes(minutes) : 'time unavailable';
   const distanceLabel = distanceMeters > 0 ? formatDistance(distanceMeters) : 'distance unavailable';
   return `${timeLabel} • ${distanceLabel}`;
+}
+
+function formatMetric(value, suffix = '') {
+  if (value === null || value === undefined || value === '') return 'N/A';
+  const num = Number(value);
+  if (Number.isFinite(num)) return `${num}${suffix}`;
+  return `${value}${suffix}`;
+}
+
+function sanitizeActivityTitle(value = '') {
+  return String(value || '')
+    .replace(/\|\s*duration\s*:[^|]*/gi, '')
+    .replace(/\|\s*type\s*:[^|]*/gi, '')
+    .replace(/^\s*(morning|afternoon|evening|night)\s*:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getReadableActivityTitle(activity = {}) {
+  const raw = sanitizeActivityTitle(activity?.title || '');
+  if (!raw) return 'Visit local highlight';
+
+  const transferMatch = raw.match(/^after\s+reaching\s+([^,]+),\s*(.*)$/i);
+  const normalizeVisit = (text = '') => {
+    const core = String(text || '')
+      .replace(/^\s*(visit|explore|discover|tour|walk\s+through|stroll\s+through|shopping\s+at|shopping\s+in|boat\s+ride\s+on|lunch\s+at|dinner\s+at|breakfast\s+at|morning\s+visit\s+to|afternoon\s+visit\s+to|evening\s+visit\s+to)\s+/i, '')
+      .trim();
+    return core ? `Visit ${core}` : 'Visit local highlight';
+  };
+
+  if (transferMatch) {
+    const city = String(transferMatch[1] || '').trim();
+    const rest = String(transferMatch[2] || '').trim();
+    return `After reaching ${city}, ${normalizeVisit(rest)}`;
+  }
+
+  return normalizeVisit(raw);
+}
+
+function getReadableActivityDescription(activity = {}) {
+  const raw = String(activity?.description || '').trim();
+  if (!raw) return '';
+
+  const cleaned = raw
+    .replace(/^\s*\d{1,2}:\d{2}\s*(?:AM|PM)?\s*-\s*/i, '')
+    .replace(/\|\s*Duration\s*:[^|]*/gi, '')
+    .replace(/\|\s*Type\s*:[^|]*/gi, '')
+    .replace(/^\s*(morning|afternoon|evening|night)\s*:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned;
+}
+
+function getVenueFallbackImage(item, mode) {
+  const seed = [mode, item?.name, item?.area || item?.vicinity || item?.best_for || 'venue']
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+
+  const sig = hash % 1000;
+  const hotelFallbacks = [
+    'https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1445019980597-93fa8acb246c?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1551882547-ff40c63fe5fa?auto=format&fit=crop&w=1200&q=80',
+  ];
+  const eateryFallbacks = [
+    'https://images.unsplash.com/photo-1517248135467-7a0c7e0f8f0a?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1559339352-11d035aa65de?auto=format&fit=crop&w=1200&q=80',
+    'https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1200&q=80',
+  ];
+
+  const fallbackPool = mode === 'hotels' ? hotelFallbacks : eateryFallbacks;
+  const fallbackUrl = fallbackPool[hash % fallbackPool.length];
+  return `${fallbackUrl}&sig=${sig}`;
 }
 
 export default function ItineraryPlannerPage() {
@@ -160,6 +251,11 @@ export default function ItineraryPlannerPage() {
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
   const [routeError, setRouteError] = useState('');
   const [toast, setToast] = useState(null);
+  const [openAdvisoryDayIndex, setOpenAdvisoryDayIndex] = useState(null);
+  const [venueDrawer, setVenueDrawer] = useState({ open: false, dayIndex: 0, mode: 'hotels' });
+  const [budgetData, setBudgetData] = useState(null);
+  const [budgetLoading, setBudgetLoading] = useState(false);
+  const [budgetError, setBudgetError] = useState('');
 
   const toastTimerRef = useRef(null);
   const lastRemovedRef = useRef(null);
@@ -223,9 +319,153 @@ export default function ItineraryPlannerPage() {
     return itineraryBundle.itinerary;
   }, [itineraryBundle]);
 
+  const getHotelsForDay = (day) => {
+    const hotels = [];
+    const seen = new Set();
+
+    const pushUnique = (item) => {
+      const name = String(item?.name || item?.area || '').trim();
+      const area = String(item?.area || item?.vicinity || '').trim();
+      const key = `${normalizeName(name)}|${normalizeName(area)}`;
+      if (!name || seen.has(key)) return;
+      seen.add(key);
+      hotels.push(item);
+    };
+
+    if (day?.stay && (day.stay.name || day.stay.area)) {
+      pushUnique(day.stay);
+    }
+    (day?.stay_options || []).forEach(pushUnique);
+    return hotels;
+  };
+
+  const getEateriesForDay = (day) => (Array.isArray(day?.dining_places) ? day.dining_places : []);
+
+  const getLocalAttractionsForDay = (day) => {
+    const highlights = [];
+    const seen = new Set();
+
+    const pushUnique = (text) => {
+      const value = String(text || '').trim();
+      if (!value) return;
+      const key = normalizeName(value);
+      if (seen.has(key)) return;
+      seen.add(key);
+      highlights.push(value);
+    };
+
+    const eateries = getEateriesForDay(day).slice(0, 2);
+    eateries.forEach((spot) => {
+      const name = String(spot?.name || '').trim();
+      const bestFor = String(spot?.best_for || spot?.cuisine || '').trim();
+      const area = String(spot?.area || spot?.vicinity || day?.city || '').trim();
+      if (!name) return;
+      if (bestFor) {
+        pushUnique(`${name} near ${area} is a well-known local eatery, popular for ${bestFor}.`);
+      } else {
+        pushUnique(`${name} near ${area} is a popular local food stop worth trying.`);
+      }
+    });
+
+    const topActivity = Array.isArray(day?.activities) ? day.activities[0] : null;
+    if (topActivity?.title) {
+      const place = String(topActivity.location || day?.city || '').trim();
+      pushUnique(`Nearby sightseeing highlight: ${topActivity.title}${place ? ` around ${place}` : ''}.`);
+    }
+
+    (day?.local_explorations || []).slice(0, 2).forEach((item) => {
+      pushUnique(String(item || '').trim());
+    });
+
+    if (highlights.length < 3 && day?.city) {
+      pushUnique(`Check for local cultural performances, festivals, or evening heritage events in ${day.city} during your dates.`);
+    }
+
+    return highlights.slice(0, 4);
+  };
+
+  const drawerDay = days[venueDrawer.dayIndex] || null;
+  const drawerItems = venueDrawer.mode === 'hotels'
+    ? getHotelsForDay(drawerDay)
+    : getEateriesForDay(drawerDay);
+
+  const openVenueDrawer = (dayIndex, mode) => {
+    setVenueDrawer({ open: true, dayIndex, mode });
+  };
+
+  const closeVenueDrawer = () => {
+    setVenueDrawer((prev) => ({ ...prev, open: false }));
+  };
+
   const activeDayMapPlaces = useMemo(() => selectedPlaces, [selectedPlaces]);
 
   const activeDay = days[activeDayIndex] || null;
+  const advisoryDay = openAdvisoryDayIndex === null ? null : days[openAdvisoryDayIndex] || null;
+  const budgetSegmentModes = journey?.stayPreferences?.segmentModes || journey?.segmentModes || {};
+  const budgetSegmentModesKey = useMemo(() => JSON.stringify(budgetSegmentModes || {}), [budgetSegmentModes]);
+
+  const budgetByDay = useMemo(() => {
+    const entries = Array.isArray(budgetData?.perDay) ? budgetData.perDay : [];
+    return entries.reduce((map, item) => {
+      const dayNumber = Number(item?.day || 0);
+      if (dayNumber > 0) {
+        map.set(dayNumber, item);
+      }
+      return map;
+    }, new Map());
+  }, [budgetData]);
+
+  const totalBudgetAmount = Number(budgetData?.totalBudget || journey?.budget || 0);
+  const estimatedBudgetAmount = Number(budgetData?.totalEstimated || 0);
+
+  useEffect(() => {
+    if (!tripId) {
+      setBudgetData(null);
+      setBudgetError('');
+      setBudgetLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadBudget = async () => {
+      setBudgetLoading(true);
+      setBudgetError('');
+
+      try {
+        const parsedSegmentModes = budgetSegmentModesKey && budgetSegmentModesKey !== '{}' ? JSON.parse(budgetSegmentModesKey) : {};
+        const payload = Object.keys(parsedSegmentModes || {}).length ? { segmentModes: parsedSegmentModes } : {};
+        const response = await fetchBudgetEstimate(tripId, payload);
+        if (cancelled) return;
+        setBudgetData(response || null);
+      } catch (error) {
+        if (cancelled) return;
+        setBudgetData(null);
+        setBudgetError(error?.message || 'Budget estimate unavailable.');
+      } finally {
+        if (!cancelled) {
+          setBudgetLoading(false);
+        }
+      }
+    };
+
+    loadBudget();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [budgetSegmentModesKey, tripId]);
+
+  useEffect(() => {
+    if (openAdvisoryDayIndex === null) return;
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setOpenAdvisoryDayIndex(null);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [openAdvisoryDayIndex]);
 
   useEffect(() => {
     let cancelled = false;
@@ -703,7 +943,7 @@ export default function ItineraryPlannerPage() {
         <header className="mb-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">
           <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Mission Itinerary</p>
           <h1 className="mt-2 text-3xl font-semibold">{journey.origin?.name || journey.origin} to {journey.destination?.name || journey.destination}</h1>
-          <p className="mt-2 text-sm text-slate-300">Day-wise route planner with transit, activities, dining, and local exploration picks.</p>
+          <p className="mt-2 text-sm text-slate-300">Day-wise route planner with transit, activities, dining, and brief local attraction highlights.</p>
         </header>
 
         <section className="grid gap-6 lg:grid-cols-12">
@@ -773,6 +1013,14 @@ export default function ItineraryPlannerPage() {
                 </ul>
               </div>
             </div>
+
+            <BudgetBreakdown
+              budgetData={budgetData}
+              loading={budgetLoading}
+              error={budgetError}
+              totalBudget={totalBudgetAmount}
+              estimatedBudget={estimatedBudgetAmount}
+            />
           </aside>
 
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 p-5 lg:col-span-8">
@@ -803,19 +1051,72 @@ export default function ItineraryPlannerPage() {
                   </div>
 
                   <div className="mt-4">
-                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Weather</p>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Weather</p>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenAdvisoryDayIndex((prev) => (prev === index ? null : index));
+                        }}
+                        className="rounded border border-cyan-400/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-500/20"
+                      >
+                        {openAdvisoryDayIndex === index ? 'Hide Advisory' : 'Weather Advisory'}
+                      </button>
+                    </div>
                     <p className="mt-1 text-base font-semibold text-cyan-100">{day.weather || 'Not specified'}</p>
-                    {day.weather_note ? <p className="mt-1 text-sm text-cyan-100/90">{day.weather_note}</p> : null}
+
                   </div>
 
-                  <div className="mt-5 grid gap-6 md:grid-cols-2">
+                    {budgetLoading ? (
+                      <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-400">
+                        Budget strip loading...
+                      </div>
+                    ) : budgetByDay.get(Number(day.day || index + 1)) ? (
+                      <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/8 px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Budget Strip</p>
+                          <span className={`text-xs font-semibold uppercase tracking-[0.12em] ${budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'text-emerald-200' : 'text-rose-200'}`}>
+                            {budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'Within plan' : 'Over plan'}
+                          </span>
+                        </div>
+                        <div className="mt-3 grid gap-2 text-xs text-slate-200 sm:grid-cols-2 lg:grid-cols-5">
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Hotel</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.hotel?.mid || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Food</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.food || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Activities</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.activities || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Transport</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.transport?.cost || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-amber-300/25 bg-amber-500/10 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-amber-200">Total</p>
+                            <p className="mt-1 font-semibold text-amber-50">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.total || 0)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : budgetError ? (
+                      <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-400">
+                        {budgetError}
+                      </div>
+                    ) : null}
+
+                  <div className="mt-5">
                     <section>
                       <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Activities</p>
                       <ol className="mt-3 space-y-3">
                         {(day.activities || []).map((activity, activityIndex) => (
                           <li key={`${day.day}-${activityIndex}`} className="pl-1">
                             <div className="flex items-start justify-between gap-3">
-                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {activity.title}</p>
+                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {getReadableActivityTitle(activity)}</p>
                               <button
                                 type="button"
                                 onClick={(event) => {
@@ -828,8 +1129,7 @@ export default function ItineraryPlannerPage() {
                                 Remove
                               </button>
                             </div>
-                            <p className="mt-1 text-xs text-slate-400">{activity.location || day.city}</p>
-                            {activity.description ? <p className="mt-1 text-sm text-slate-300">{activity.description}</p> : null}
+                            {activity.description ? <p className="mt-1 text-sm text-slate-300">{getReadableActivityDescription(activity)}</p> : null}
 
                             {index === activeDayIndex && activityIndex < (day.activities || []).length - 1 ? (
                               <div className="mt-2 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
@@ -842,40 +1142,12 @@ export default function ItineraryPlannerPage() {
                       </ol>
 
                       <div className="mt-5">
-                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Local Explorations</p>
+                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Local Attractions</p>
                         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-300">
-                          {(day.local_explorations || []).map((item, itemIndex) => (
+                          {getLocalAttractionsForDay(day).map((item, itemIndex) => (
                             <li key={`${day.day}-local-${itemIndex}`}>{item}</li>
                           ))}
                         </ul>
-                      </div>
-                    </section>
-
-                    <section>
-                      <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Dining Picks</p>
-                      <ul className="mt-3 space-y-3">
-                        {(day.dining_places || []).map((spot, spotIndex) => (
-                          <li key={`${day.day}-dining-${spotIndex}`} className="pl-1">
-                            <p className="text-base font-semibold text-slate-100">{spot.name || 'Recommended dining place'}</p>
-                            <p className="mt-1 text-sm text-slate-300">{spot.cuisine || 'Cuisine'} • {spot.area || day.city}</p>
-                            {spot.best_for ? <p className="mt-1 text-sm text-emerald-200/90">Best for: {spot.best_for}</p> : null}
-                          </li>
-                        ))}
-                        {(!day.dining_places || day.dining_places.length === 0) ? (
-                          <li className="text-sm text-slate-400">No dining picks generated for this day.</li>
-                        ) : null}
-                      </ul>
-
-                      <div className="mt-5">
-                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Stay</p>
-                        {day.stay?.area ? (
-                          <>
-                            <p className="mt-2 text-base font-semibold text-emerald-100">{day.stay.area} {day.stay.type ? `• ${day.stay.type}` : ''}</p>
-                            {day.stay.reason ? <p className="mt-1 text-sm text-emerald-100/90">{day.stay.reason}</p> : null}
-                          </>
-                        ) : (
-                          <p className="mt-2 text-sm text-slate-300">Stay recommendation not available.</p>
-                        )}
                       </div>
                     </section>
                   </div>
@@ -887,6 +1159,29 @@ export default function ItineraryPlannerPage() {
                         <li key={`${day.day}-tip-${tipIndex}`}>{tip}</li>
                       ))}
                     </ul>
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap gap-3 border-t border-slate-800 pt-4">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openVenueDrawer(index, 'hotels');
+                      }}
+                      className="rounded-lg border border-emerald-300/35 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/20"
+                    >
+                      Hotels
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openVenueDrawer(index, 'eateries');
+                      }}
+                      className="rounded-lg border border-amber-300/35 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/20"
+                    >
+                      Eateries
+                    </button>
                   </div>
                 </article>
               ))}
@@ -909,6 +1204,117 @@ export default function ItineraryPlannerPage() {
           </Link>
         </div>
       </div>
+
+      {advisoryDay ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpenAdvisoryDayIndex(null)}
+            className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-[1px]"
+            aria-label="Close weather advisory"
+          />
+          <aside className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto border-l border-cyan-300/25 bg-slate-950/95 p-5 shadow-2xl">
+            <div className="mx-auto max-w-lg">
+              <div className="flex items-start justify-between gap-3 border-b border-cyan-300/20 pb-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-cyan-200">Weather Advisory</p>
+                  <h3 className="mt-1 text-xl font-semibold text-cyan-50">Day {advisoryDay.day || (openAdvisoryDayIndex + 1)} • {advisoryDay.city || 'Unknown city'}</h3>
+                  <p className="mt-1 text-sm text-cyan-100">{advisoryDay.weather || 'Not specified'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOpenAdvisoryDayIndex(null)}
+                  className="rounded border border-cyan-300/30 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-500/20"
+                >
+                  Close
+                </button>
+              </div>
+
+              <section className="mt-4 rounded-xl border border-cyan-300/20 bg-cyan-500/10 p-4 text-cyan-50">
+                <p className="text-xs uppercase tracking-[0.14em] text-cyan-200">Daily Data</p>
+                <div className="mt-2 grid gap-2 text-xs sm:grid-cols-2">
+                  <p>Date: {advisoryDay.weather_details?.date || 'N/A'}</p>
+                  <p>Condition: {advisoryDay.weather_details?.condition || 'N/A'}</p>
+                  <p>Temp (min-max): {formatMetric(advisoryDay.weather_details?.min_temp_c, 'C')} to {formatMetric(advisoryDay.weather_details?.max_temp_c, 'C')}</p>
+                  <p>Average Temp: {formatMetric(advisoryDay.weather_details?.avg_temp_c, 'C')}</p>
+                  <p>Humidity: {formatMetric(advisoryDay.weather_details?.avg_humidity, '%')}</p>
+                  <p>Rain Chance: {formatMetric(advisoryDay.weather_details?.daily_chance_of_rain, '%')}</p>
+                  <p>Sunrise/Sunset: {advisoryDay.weather_details?.sunrise || 'N/A'} / {advisoryDay.weather_details?.sunset || 'N/A'}</p>
+                </div>
+                <p className="mt-2 text-xs text-cyan-100/80">Alerts: {advisoryDay.weather_details?.alerts_summary || 'No severe alerts'}</p>
+              </section>
+
+              <section className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/10 p-4 text-amber-50">
+                <p className="text-xs uppercase tracking-[0.14em] text-amber-200">Human Advisory</p>
+                <p className="mt-2 text-sm leading-relaxed text-amber-100/95 whitespace-pre-line">
+                  {advisoryDay.weather_note || 'No advisory narrative available for this day.'}
+                </p>
+              </section>
+
+            </div>
+          </aside>
+        </>
+      ) : null}
+
+      {venueDrawer.open ? (
+        <>
+          <button
+            type="button"
+            aria-label="Close venue drawer"
+            onClick={closeVenueDrawer}
+            className="fixed inset-0 z-40 bg-slate-950/70"
+          />
+          <aside className="fixed right-0 top-0 z-50 h-full w-full max-w-md border-l border-slate-700 bg-slate-900/95 p-4 shadow-2xl backdrop-blur-md">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-700 pb-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Day {drawerDay?.day || venueDrawer.dayIndex + 1}</p>
+                <h3 className="mt-1 text-lg font-semibold text-slate-100">
+                  {venueDrawer.mode === 'hotels' ? 'Hotels & Hostels' : 'Eateries'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeVenueDrawer}
+                className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-slate-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 max-h-[calc(100vh-110px)] space-y-3 overflow-y-auto pr-1">
+              {drawerItems.length === 0 ? (
+                <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 text-sm text-slate-300">
+                  No {venueDrawer.mode === 'hotels' ? 'hotel/hostel' : 'eatery'} suggestions available for this day.
+                </div>
+              ) : drawerItems.map((item, itemIndex) => (
+                <article key={`${item.name || 'venue'}-${itemIndex}`} className="overflow-hidden rounded-xl border border-slate-700 bg-slate-950/70">
+                  <div className="relative h-40 w-full overflow-hidden bg-slate-800">
+                    {item.imageUrl ? (
+                      <img
+                        src={item.imageUrl}
+                        alt={item.name || 'Venue'}
+                        className="h-full w-full object-cover"
+                        onError={(event) => {
+                          event.currentTarget.remove();
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                  <div className="p-3">
+                    <p className="text-base font-semibold text-slate-100">{item.name || 'Unnamed place'}</p>
+                    <p className="mt-1 text-sm text-slate-300">{item.area || item.vicinity || drawerDay?.city || 'Location unavailable'}</p>
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
+                      {item.rating ? <span className="rounded-full border border-emerald-300/35 bg-emerald-500/10 px-2 py-1">Reviews: {Number(item.rating).toFixed(1)}</span> : null}
+                    </div>
+                    {item.reason ? <p className="mt-2 text-xs text-emerald-200/90">{item.reason}</p> : null}
+                    {item.best_for ? <p className="mt-2 text-xs text-amber-100/90">Best for: {item.best_for}</p> : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </aside>
+        </>
+      ) : null}
 
       {toast ? (
         <div className="fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border border-slate-700 bg-slate-900/95 p-3 shadow-xl">

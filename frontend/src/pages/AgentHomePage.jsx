@@ -4,9 +4,8 @@ import { motion } from 'framer-motion';
 import { MapContainer, TileLayer, Marker, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { computeRoute, createTrip, generateItinerary, generatePlaces, logoutUser, selectPlaces } from '../api';
+import { createTrip, generateItinerary, generatePlaces, getFlightCost, logoutUser, selectPlaces } from '../api';
 import PlacesMap from '../components/PlacesMap';
-import { buildRouteMetrics } from '../utils/routeMath';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -18,8 +17,34 @@ L.Icon.Default.mergeOptions({
 const MotionSection = motion.section;
 const OPENCAGE_API_KEY = import.meta.env.VITE_OPENCAGE_API_KEY || '28c64189eddc4ad5a26acec1c867fdc8';
 const HISTORY_KEY = 'agentJourneyHistory';
-const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', 'Stay Preferences', 'Final Route'];
+const STEP_ITEMS = ['Plan Your Trip', 'Customize Route', 'Journey Setup', 'Final Route'];
 const DUMMY_NIGHTS_PATTERN = [2, 1, 3, 2, 1, 2];
+
+const IR_SLABS = [
+  { max: 5, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 10, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 50, SL: 72, '3A': 216, '2A': 402, '1A': 985 },
+  { max: 100, SL: 110, '3A': 468, '2A': 664, '1A': 1133 },
+  { max: 150, SL: 140, '3A': 468, '2A': 664, '1A': 1133 },
+  { max: 200, SL: 168, '3A': 577, '2A': 795, '1A': 1440 },
+  { max: 250, SL: 196, '3A': 640, '2A': 908, '1A': 1710 },
+  { max: 300, SL: 223, '3A': 711, '2A': 1018, '1A': 1980 },
+  { max: 400, SL: 275, '3A': 852, '2A': 1228, '1A': 2430 },
+  { max: 500, SL: 325, '3A': 990, '2A': 1430, '1A': 2870 },
+  { max: 600, SL: 375, '3A': 1130, '2A': 1638, '1A': 3310 },
+  { max: 700, SL: 422, '3A': 1260, '2A': 1838, '1A': 3740 },
+  { max: 800, SL: 468, '3A': 1390, '2A': 2038, '1A': 4170 },
+  { max: 900, SL: 512, '3A': 1518, '2A': 2230, '1A': 4590 },
+  { max: 1000, SL: 555, '3A': 1645, '2A': 2420, '1A': 5000 },
+  { max: 9999, SL: 600, '3A': 1780, '2A': 2620, '1A': 5400 },
+];
+
+const TRANSPORT_MODES = [
+  { key: 'flight', label: 'Flight' },
+  { key: 'train', label: 'Train' },
+  { key: 'bus', label: 'Bus' },
+  { key: 'car', label: 'Car' },
+];
 
 // ─── Wikipedia Photo Helpers ───────────────────────────────────────────────────
 
@@ -199,6 +224,106 @@ function distanceKmCoords(a, b) {
   return 6371 * 2 * Math.atan2(Math.sqrt(aVal), Math.sqrt(1 - aVal));
 }
 
+function getTrainFare(distKm, cls) {
+  const slab = IR_SLABS.find((s) => distKm <= s.max) || IR_SLABS[IR_SLABS.length - 1];
+  return Number(slab?.[cls] || 0);
+}
+
+function formatDuration(mins) {
+  const total = Math.max(1, Math.round(Number(mins) || 0));
+  if (total >= 60) {
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return `${h}h ${m}m`;
+  }
+  return `${total}m`;
+}
+
+function formatInr(value) {
+  return `\u20b9${Math.round(Number(value) || 0).toLocaleString('en-IN')}`;
+}
+
+function formatInrRange(minValue, maxValue) {
+  const minSafe = Math.max(0, Math.round(Number(minValue) || 0));
+  const maxSafe = Math.max(minSafe, Math.round(Number(maxValue) || 0));
+  return `${formatInr(minSafe)} - ${formatInr(maxSafe)}`;
+}
+
+function getModeDurationMinutes(mode, distanceKm) {
+  const dist = Math.max(1, Number(distanceKm) || 1);
+  if (mode === 'flight') return Math.round((dist / 700) * 60 + 150);
+  if (mode === 'train') return Math.round(((dist * 1.4) / 80) * 60);
+  if (mode === 'bus') return Math.round(((dist * 1.3) / 55) * 60);
+  return Math.round(((dist * 1.2) / 65) * 60);
+}
+
+function getSegmentKey(from, to) {
+  return `${String(from || '').trim()}|${String(to || '').trim()}`;
+}
+
+function modeIcon(mode) {
+  if (mode === 'flight') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M2 16l20-8-8 20-2-8-8-4z" />
+      </svg>
+    );
+  }
+
+  if (mode === 'train') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="6" y="3" width="12" height="14" rx="2" />
+        <path d="M8 7h8M9 12h.01M15 12h.01M8 21l2-3m6 3-2-3" />
+      </svg>
+    );
+  }
+
+  if (mode === 'bus') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="13" rx="2" />
+        <path d="M7 17v2m10-2v2M6 9h12" />
+        <circle cx="8" cy="19" r="1" />
+        <circle cx="16" cy="19" r="1" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="mx-auto h-5 w-5 text-slate-300" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 11l1-3a2 2 0 0 1 1.9-1.3h8.2A2 2 0 0 1 18 8l1 3" />
+      <rect x="4" y="11" width="16" height="6" rx="1.5" />
+      <circle cx="8" cy="17" r="1" />
+      <circle cx="16" cy="17" r="1" />
+    </svg>
+  );
+}
+
+function summarizeOrderedRoute(route) {
+  const points = (Array.isArray(route) ? route : [])
+    .map((point) => ({
+      lat: Number(point?.lat),
+      lng: Number(point?.lng ?? point?.lon),
+    }))
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+
+  if (points.length < 2) {
+    return { totalDistance: 0, estimatedHours: 0 };
+  }
+
+  let totalDistance = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    totalDistance += distanceKmCoords(points[index], points[index + 1]);
+  }
+
+  const estimatedHours = Math.max(1, Math.round((totalDistance / 50) * 10) / 10);
+  return {
+    totalDistance: Math.max(1, Math.round(totalDistance)),
+    estimatedHours,
+  };
+}
+
 function findBestRoute(origin, destination, stops) {
   const rem = [...stops], ordered = [origin];
   let current = origin, total = 0;
@@ -213,21 +338,8 @@ function findBestRoute(origin, destination, stops) {
   }
   total += distanceKmCoords(current, destination);
   ordered.push(destination);
-  return { route: ordered, totalDistance: Math.round(total), estimatedHours: Math.max(1, Math.round(total / 780)) };
-}
-
-function formatDurationFromMinutes(totalMinutes = 0) {
-  const mins = Math.max(1, Math.round(Number(totalMinutes) || 0));
-  if (mins < 60) return `${mins} min`;
-  const hours = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return rem ? `${hours}h ${rem}m` : `${hours}h`;
-}
-
-function buildWaypointHash(points = []) {
-  return points
-    .map((point) => `${Number(point?.lat).toFixed(5)},${Number(point?.lng).toFixed(5)}`)
-    .join('|');
+  const metrics = summarizeOrderedRoute(ordered);
+  return { route: ordered, ...metrics };
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
@@ -248,6 +360,8 @@ export default function AgentHomePage() {
   const [result, setResult] = useState(null);
   const [finalizedRoute, setFinalizedRoute] = useState([]);
   const [stayPreferences, setStayPreferences] = useState({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
+  const [segmentModes, setSegmentModes] = useState({});
+  const [flightFares, setFlightFares] = useState({});
   const [history, setHistory] = useState([]);
   const [error, setError] = useState('');
 
@@ -259,9 +373,6 @@ export default function AgentHomePage() {
   const [hiddenPlaces, setHiddenPlaces] = useState({});
   const [draftTripId, setDraftTripId] = useState('');
   const [itineraryLoading, setItineraryLoading] = useState(false);
-  const [routeLoading, setRouteLoading] = useState(false);
-  const [liveRouteMetrics, setLiveRouteMetrics] = useState(null);
-  const [liveRouteMetricsLoading, setLiveRouteMetricsLoading] = useState(false);
 
   // Doc-2 route-edit state
   const [dragStopIndex, setDragStopIndex] = useState(null);
@@ -306,6 +417,215 @@ export default function AgentHomePage() {
   }, [stopSuggestions, origin, destination, stops]);
 
   const activeRoute = finalizedRoute.length > 0 ? finalizedRoute : result?.route || [];
+  const routeSegments = useMemo(() => {
+    const normalized = (Array.isArray(activeRoute) ? activeRoute : [])
+      .map((point) => ({
+        name: String(point?.name || '').trim(),
+        lat: Number(point?.lat),
+        lng: Number(point?.lng ?? point?.lon),
+      }))
+      .filter((point) => point.name && Number.isFinite(point.lat) && Number.isFinite(point.lng));
+
+    if (normalized.length < 2) return [];
+
+    const segments = [];
+    for (let index = 0; index < normalized.length - 1; index += 1) {
+      const from = normalized[index];
+      const to = normalized[index + 1];
+      const distanceKm = Math.max(1, Math.round(distanceKmCoords(from, to)));
+      const key = getSegmentKey(from.name, to.name);
+      segments.push({ key, from: from.name, to: to.name, distanceKm });
+    }
+    return segments;
+  }, [activeRoute]);
+
+  useEffect(() => {
+    if (!stayPreferences?.segmentModes || Object.keys(stayPreferences.segmentModes).length === 0) return;
+    setSegmentModes((prev) => (Object.keys(prev).length ? prev : stayPreferences.segmentModes));
+  }, [stayPreferences]);
+
+  useEffect(() => {
+    const activeKeys = new Set(routeSegments.map((segment) => segment.key));
+    setSegmentModes((prev) => {
+      const next = {};
+      Object.entries(prev || {}).forEach(([key, value]) => {
+        if (activeKeys.has(key)) next[key] = value;
+      });
+      return next;
+    });
+    setFlightFares((prev) => {
+      const next = {};
+      Object.entries(prev || {}).forEach(([key, value]) => {
+        if (activeKeys.has(key)) next[key] = value;
+      });
+      return next;
+    });
+  }, [routeSegments]);
+
+  useEffect(() => {
+    if (currentStep !== 3 || routeSegments.length === 0) return;
+
+    routeSegments.forEach((segment) => {
+      const existing = flightFares[segment.key];
+      if (existing?.loading || existing?.resolved) return;
+
+      setFlightFares((prev) => ({
+        ...prev,
+        [segment.key]: { loading: true, resolved: false, error: false, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
+      }));
+
+      getFlightCost({ from: segment.from, to: segment.to })
+        .then((data) => {
+          const minFare = Number(data?.minFare);
+          if (data?.success && Number.isFinite(minFare) && minFare > 0) {
+            setFlightFares((prev) => ({
+              ...prev,
+              [segment.key]: {
+                loading: false,
+                resolved: true,
+                error: false,
+                noFlights: false,
+                minFare: Math.round(minFare),
+                currency: String(data?.currency || 'INR'),
+                oneWayMinutes: data?.oneWayMinutes != null && Number.isFinite(Number(data.oneWayMinutes)) ? Number(data.oneWayMinutes) : null,
+              },
+            }));
+            return;
+          }
+
+          setFlightFares((prev) => ({
+            ...prev,
+            [segment.key]: {
+              loading: false,
+              resolved: true,
+              error: !Boolean(data?.noFlights),
+              noFlights: Boolean(data?.noFlights),
+              minFare: null,
+              currency: 'INR',
+              oneWayMinutes: null,
+            },
+          }));
+        })
+        .catch(() => {
+          setFlightFares((prev) => ({
+            ...prev,
+            [segment.key]: { loading: false, resolved: true, error: true, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
+          }));
+        });
+    });
+  }, [currentStep, routeSegments, flightFares]);
+
+  const getSegmentSelection = (segmentKey) => {
+    const saved = segmentModes?.[segmentKey];
+    return {
+      mode: saved?.mode || 'car',
+      trainClass: saved?.trainClass || '3A',
+      cost: Number(saved?.cost || 0),
+      timeMin: Number(saved?.timeMin || 0),
+    };
+  };
+
+  const getModeMeta = (segment, mode, trainClass) => {
+    const dist = Number(segment?.distanceKm || 0);
+    const timeMin = getModeDurationMinutes(mode, dist);
+
+    if (mode === 'train') {
+      const selectedClass = trainClass || '3A';
+      const fare = getTrainFare(dist, selectedClass);
+      return {
+        timeMin,
+        costValue: fare,
+        costLabel: `${formatInr(fare)} (${selectedClass})`,
+      };
+    }
+
+    if (mode === 'bus') {
+      const base = Math.round(dist * 1.1);
+      const min = Math.round(base * 0.8);
+      const max = Math.round(base * 1.3);
+      return {
+        timeMin,
+        costValue: min,
+        costLabel: formatInrRange(min, max),
+      };
+    }
+
+    if (mode === 'car') {
+      const base = Math.round(dist * 13);
+      const min = Math.round(base * 0.9);
+      const max = Math.round(base * 1.1);
+      return {
+        timeMin,
+        costValue: min,
+        costLabel: formatInrRange(min, max),
+      };
+    }
+
+    const fareState = flightFares[segment.key];
+    if (fareState?.loading) {
+      return {
+        timeMin,
+        costValue: Number.POSITIVE_INFINITY,
+        costLabel: 'Fetching live fare...',
+      };
+    }
+
+    if (fareState?.noFlights) {
+      return {
+        timeMin,
+        costValue: Number.POSITIVE_INFINITY,
+        costLabel: 'No flights available',
+      };
+    }
+
+    if (fareState?.minFare) {
+      const apiTime = fareState?.oneWayMinutes;
+      return {
+        timeMin: apiTime != null && Number.isFinite(Number(apiTime)) ? Number(apiTime) : timeMin,
+        costValue: Number(fareState.minFare),
+        costLabel: `${formatInr(fareState.minFare)} (live)`,
+      };
+    }
+
+    return {
+      timeMin,
+      costValue: 4000,
+      costLabel: '\u20b94,000 - \u20b912,000 (est.)',
+    };
+  };
+
+  const selectSegmentMode = (segment, mode) => {
+    const key = segment.key;
+    const prev = getSegmentSelection(key);
+    const trainClass = prev.trainClass || '3A';
+    const meta = getModeMeta(segment, mode, trainClass);
+
+    setSegmentModes((current) => ({
+      ...current,
+      [key]: {
+        mode,
+        trainClass,
+        cost: meta.costValue,
+        timeMin: meta.timeMin,
+      },
+    }));
+  };
+
+  const selectTrainClass = (segment, trainClass) => {
+    const key = segment.key;
+    const prev = getSegmentSelection(key);
+    const meta = getModeMeta(segment, 'train', trainClass);
+
+    setSegmentModes((current) => ({
+      ...current,
+      [key]: {
+        mode: 'train',
+        trainClass,
+        cost: meta.costValue,
+        timeMin: meta.timeMin,
+      },
+    }));
+  };
   const checkpointMapPlaces = activeRoute
     .map((place) => ({
       name: place?.name || '',
@@ -332,62 +652,31 @@ export default function AgentHomePage() {
   const availablePreviewStopOptions = previewStopSuggestions.filter((p) => !previewSelectedNames.has(p.name));
   const occupiedEditNames = new Set(activeRoute.filter((_, i) => i !== editingRouteIndex).map((p) => getPlaceLabel(p)));
   const availableEditStopOptions = editStopSuggestions.filter((p) => !occupiedEditNames.has(p.name));
-  const routeMapPoints = useMemo(() => activeRoute
+  const routeMapPoints = activeRoute
     .map((p) => ({
       ...p,
       lat: Number(p?.lat),
       lng: Number(p?.lng ?? p?.lon),
     }))
-    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)), [activeRoute]);
-  const routeMapPath = useMemo(() => routeMapPoints.map((p) => [p.lat, p.lng]), [routeMapPoints]);
-  const routeWaypointHash = useMemo(() => buildWaypointHash(routeMapPoints), [routeMapPoints]);
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  const routeMapPath = routeMapPoints.map((p) => [p.lat, p.lng]);
   const progressPercent = ((currentStep - 1) / (STEP_ITEMS.length - 1)) * 100;
 
-  useEffect(() => {
-    if (!result || routeMapPoints.length < 2) {
-      setLiveRouteMetrics(null);
-      return;
-    }
+  const commitRouteChange = (nextRoute) => {
+    const next = Array.isArray(nextRoute) ? nextRoute : [];
+    setFinalizedRoute(next);
 
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        setLiveRouteMetricsLoading(true);
-        const response = await computeRoute({
-          waypoints: routeMapPoints.map((point) => ({ lat: point.lat, lng: point.lng })),
-          mode: 'drive',
-          options: {},
-        });
+    if (!result) return;
 
-        if (cancelled) return;
-        const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-        if (metrics.distanceKm > 0 || metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0) {
-          setLiveRouteMetrics(metrics);
-        }
-      } catch {
-        if (!cancelled) {
-          setLiveRouteMetrics(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setLiveRouteMetricsLoading(false);
-        }
-      }
-    }, 280);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [result, routeWaypointHash, routeMapPoints]);
-
-  const effectiveDistanceKm = liveRouteMetrics?.distanceKm > 0
-    ? Math.max(1, Math.round(liveRouteMetrics.distanceKm))
-    : Number(result?.totalDistance || 0);
-  const effectiveMinutes = liveRouteMetrics?.estimatedMinutes || liveRouteMetrics?.durationMinutes || 0;
-  const effectiveDurationLabel = effectiveMinutes > 0
-    ? formatDurationFromMinutes(effectiveMinutes)
-    : `${Math.max(1, Number(result?.estimatedHours || 1))} hrs`;
+    const metrics = summarizeOrderedRoute(next);
+    setResult((prev) => (prev ? {
+      ...prev,
+      route: next,
+      totalDistance: metrics.totalDistance,
+      estimatedHours: metrics.estimatedHours,
+      routeMetrics: metrics,
+    } : prev));
+  };
 
   const getNightLabel = (place, index) => {
     const n = Number(place?.nights);
@@ -428,7 +717,7 @@ export default function AgentHomePage() {
     const next = [...src];
     const [m] = next.splice(from, 1);
     next.splice(to, 0, m);
-    setFinalizedRoute(next);
+    commitRouteChange(next);
   };
 
   const editRoutePoint = (index) => {
@@ -449,7 +738,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     const point = src[index];
     if (!point || getPlaceLabel(point) === getPlaceLabel(origin)) return;
-    setFinalizedRoute(src.filter((_, i) => i !== index));
+    commitRouteChange(src.filter((_, i) => i !== index));
   };
 
   const addPreviewDestination = () => {
@@ -466,7 +755,7 @@ export default function AgentHomePage() {
       nights: Math.max(1, Number(previewNights || 1)),
     };
     setError('');
-    setFinalizedRoute([...src, newPoint]);
+    commitRouteChange([...src, newPoint]);
     setPreviewStop(null); setPreviewStopInput(''); setPreviewNights(1);
     setShowPreviewAddBox(false); setDragRouteIndex(null);
   };
@@ -478,7 +767,7 @@ export default function AgentHomePage() {
     const src = finalizedRoute.length > 0 ? finalizedRoute : result.route || [];
     if (editingRouteIndex < 0 || editingRouteIndex >= src.length) return;
     setError('');
-    setFinalizedRoute(src.map((item, i) =>
+    commitRouteChange(src.map((item, i) =>
       i === editingRouteIndex
         ? { ...item, name: nextName, lat: editStopSelection?.lat ?? item.lat, lng: editStopSelection?.lng ?? item.lng, nights: Math.max(1, Number(editNights || 1)) }
         : item
@@ -487,60 +776,29 @@ export default function AgentHomePage() {
   };
 
   // ── Build journey ──
-  const buildJourney = async () => {
+  const buildJourney = () => {
     setError(''); setPlacesError(''); setCheckpointPlaces({}); setPlacesRequestKey(''); setHiddenPlaces({});
     if (!origin || !destination) { setError('Select valid start and destination cities from suggestions.'); return; }
     if (origin.name === destination.name) { setError('Origin and destination must be different.'); return; }
     if (!departureDate || !comingDate) { setError('Please add both departure and coming dates.'); return; }
     if (new Date(comingDate) < new Date(departureDate)) { setError('Coming date must be after departure date.'); return; }
     const optimized = findBestRoute(origin, destination, stops);
-    setRouteLoading(true);
-
-    try {
-      const response = await computeRoute({
-        waypoints: optimized.route.map((place) => ({
-          lat: Number(place?.lat),
-          lng: Number(place?.lng ?? place?.lon),
-        })),
-        mode: 'drive',
-        options: {},
-      });
-
-      const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
-      const totalDistance = metrics.distanceKm > 0 ? Math.max(1, Math.round(metrics.distanceKm)) : optimized.totalDistance;
-      const estimatedHours = (metrics.estimatedMinutes > 0 || metrics.durationMinutes > 0)
-        ? Math.max(1, Math.round((metrics.estimatedMinutes || metrics.durationMinutes) / 60))
-        : optimized.estimatedHours;
-
-      const journeyRecord = {
-        id: Date.now(), createdAt: new Date().toISOString(),
-        origin, destination, departureDate, comingDate, budgetRange, stops,
-        route: optimized.route,
-        routeMetrics: metrics,
-        totalDistance,
-        estimatedHours,
-      };
-
-      setResult(journeyRecord);
-      setFinalizedRoute(optimized.route);
-      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
-      setEditingRouteIndex(null); setEditStopSelection(null);
-      setCurrentStep(2);
-    } catch {
-      const journeyRecord = {
-        id: Date.now(), createdAt: new Date().toISOString(),
-        origin, destination, departureDate, comingDate, budgetRange, stops,
-        route: optimized.route, totalDistance: optimized.totalDistance, estimatedHours: optimized.estimatedHours,
-      };
-
-      setResult(journeyRecord);
-      setFinalizedRoute(optimized.route);
-      setShowPreviewAddBox(false); setShowPreviewEditBox(false);
-      setEditingRouteIndex(null); setEditStopSelection(null);
-      setCurrentStep(2);
-    } finally {
-      setRouteLoading(false);
-    }
+    const journeyRecord = {
+      id: Date.now(), createdAt: new Date().toISOString(),
+      origin, destination, departureDate, comingDate, budgetRange, stops,
+      route: optimized.route,
+      totalDistance: optimized.totalDistance,
+      estimatedHours: optimized.estimatedHours,
+      routeMetrics: {
+        totalDistance: optimized.totalDistance,
+        estimatedHours: optimized.estimatedHours,
+      },
+    };
+    setResult(journeyRecord);
+    setFinalizedRoute(optimized.route);
+    setShowPreviewAddBox(false); setShowPreviewEditBox(false);
+    setEditingRouteIndex(null); setEditStopSelection(null);
+    setCurrentStep(2);
   };
 
   // ── Checkpoint toggle ──
@@ -551,6 +809,14 @@ export default function AgentHomePage() {
       const next = [...prev];
       const di = next.findIndex((cp) => cp.name === destination.name);
       di >= 0 ? next.splice(di, 0, place) : next.push(place);
+      const metrics = summarizeOrderedRoute(next);
+      setResult((current) => (current ? {
+        ...current,
+        route: next,
+        totalDistance: metrics.totalDistance,
+        estimatedHours: metrics.estimatedHours,
+        routeMetrics: metrics,
+      } : current));
       return next;
     });
   };
@@ -615,6 +881,7 @@ export default function AgentHomePage() {
           stops: deriveRouteStops(routeForPlanner, originName, destinationName),
           budget: Number(budgetRange?.[1] || 0),
           dates: [departureDate, comingDate].filter(Boolean),
+          stayPreferences,
         });
         currentTripId = created?.trip?._id || '';
         if (!currentTripId) throw new Error('Unable to create trip for itinerary generation.');
@@ -684,6 +951,7 @@ export default function AgentHomePage() {
     setShowPreviewAddBox(false); setShowPreviewEditBox(false);
     setEditingRouteIndex(null); setEditStopInput(''); setEditNights(1); setEditStopSelection(null);
     setStayPreferences({ hotel3: true, hotel4: true, hotel5: true, travelers: 1, rooms: 1 });
+    setSegmentModes({}); setFlightFares({});
     setCheckpointPlaces({}); setPlacesLoading(false); setPlacesError('');
     setPlacesRequestKey(''); setHiddenPlaces({}); setDraftTripId(''); setItineraryLoading(false);
     setCurrentStep(1);
@@ -869,8 +1137,8 @@ export default function AgentHomePage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <button type="button" onClick={resetPlanner}
                     className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Cancel</button>
-                  <button type="button" onClick={buildJourney} disabled={routeLoading}
-                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70">{routeLoading ? 'Calculating Route...' : 'Continue'}</button>
+                  <button type="button" onClick={buildJourney}
+                    className="rounded-xl border border-amber-300/35 bg-linear-to-r from-blue-600/85 to-blue-800/85 px-5 py-3 text-lg font-semibold text-white transition hover:brightness-110">Continue</button>
                 </div>
               </div>
             </div>
@@ -1023,12 +1291,11 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
-                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
               </div>
             </div>
 
@@ -1036,21 +1303,108 @@ export default function AgentHomePage() {
               <button type="button" onClick={resetPlanner}
                 className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Back</button>
               <button type="button" onClick={() => setCurrentStep(3)}
-                className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">Continue to Stay Preferences</button>
+                className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">Continue to Journey Setup</button>
             </div>
           </MotionSection>
 
         /* ══════════════════════════════════════════════════════════════════
-            STEP 3 — Stay Preferences
+            STEP 3 — Journey Setup
         ══════════════════════════════════════════════════════════════════ */
         ) : currentStep === 3 ? (
           <MotionSection initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
-            <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Stay Preferences</h2>
-            <p className="mt-2 text-sm text-slate-400">Select hotel comfort and room allocation before finalizing the route.</p>
-            <div className="mt-8 space-y-6">
+            className="mx-auto w-full max-w-6xl rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
+            <h2 className="text-3xl font-semibold tracking-tight text-slate-100">Journey Setup</h2>
+            <p className="mt-2 text-sm text-slate-400">Choose transport for each segment, then confirm stay preferences.</p>
+
+            <div className="mt-7 rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6">
+              {routeSegments.length === 0 ? (
+                <p className="text-sm text-slate-400">Build at least two route points to configure transport.</p>
+              ) : routeSegments.map((segment, segmentIndex) => {
+                const selected = getSegmentSelection(segment.key);
+                const modeCards = TRANSPORT_MODES.map((item) => {
+                  const meta = getModeMeta(segment, item.key, selected.trainClass);
+                  const isSelected = selected.mode === item.key;
+
+                  return {
+                    ...item,
+                    isSelected,
+                    costLabel: meta.costLabel,
+                    costValue: Number(meta.costValue),
+                    timeMin: Number(meta.timeMin),
+                  };
+                });
+
+                const validForCompare = modeCards.filter((card) => Number.isFinite(card.costValue) && card.costValue < Number.POSITIVE_INFINITY);
+                const cheapest = validForCompare.length
+                  ? validForCompare.reduce((best, card) => (card.costValue < best.costValue ? card : best), validForCompare[0])
+                  : null;
+                const fastest = modeCards.reduce((best, card) => (card.timeMin < best.timeMin ? card : best), modeCards[0]);
+
+                return (
+                  <div key={segment.key}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Segment {segmentIndex + 1}</p>
+                        <p className="text-lg font-semibold text-slate-100">
+                          {segment.from} <span className="px-1 text-amber-300">&rarr;</span> {segment.to}
+                        </p>
+                      </div>
+                      <p className="text-xs text-slate-500">~{segment.distanceKm} km</p>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      {modeCards.map((card) => (
+                        <button
+                          key={`${segment.key}-${card.key}`}
+                          type="button"
+                          onClick={() => selectSegmentMode(segment, card.key)}
+                          className={`relative rounded-xl border bg-slate-950/60 p-4 text-center transition hover:border-amber-300/40 ${card.isSelected ? 'border-2 border-amber-300/70 bg-amber-300/5' : 'border-slate-700'}`}
+                        >
+                          {fastest?.key === card.key ? (
+                            <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-blue-400/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">Fastest</span>
+                          ) : null}
+                          {cheapest?.key === card.key ? (
+                            <span className="absolute -top-2 right-2 whitespace-nowrap rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">Cheapest</span>
+                          ) : null}
+                          {modeIcon(card.key)}
+                          <p className="mt-2 text-xs font-medium text-slate-300">{card.label}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-100">
+                            {card.key === 'flight' && flightFares[segment.key]?.loading ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-500 border-t-cyan-300" />
+                                Fetching live fare...
+                              </span>
+                            ) : card.costLabel}
+                          </p>
+                          <p className="mt-0.5 text-xs text-slate-500">{formatDuration(card.timeMin)}</p>
+                        </button>
+                      ))}
+                    </div>
+
+                    {selected.mode === 'train' ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {['SL', '3A', '2A', '1A'].map((cls) => (
+                          <button
+                            key={`${segment.key}-${cls}`}
+                            type="button"
+                            onClick={() => selectTrainClass(segment, cls)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs transition ${selected.trainClass === cls ? 'border-amber-300/60 bg-amber-300/10 text-amber-200' : 'border-slate-700 text-slate-400'}`}
+                          >
+                            {cls}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {segmentIndex < routeSegments.length - 1 ? <div className="my-5 border-t border-slate-800" /> : null}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-7 space-y-6">
               <div className="rounded-xl border border-amber-300/30 bg-slate-950/55 p-4">
-                <p className="mb-3 text-lg font-semibold text-slate-100">Hotel Type</p>
+                <p className="mb-3 text-lg font-semibold text-slate-100">Stay Preferences</p>
                 <div className="space-y-3">
                   {[['hotel3', '3-Stars'], ['hotel4', '4-Stars'], ['hotel5', '5-Stars']].map(([key, label]) => (
                     <button key={key} type="button" onClick={() => setStayPreferences((prev) => ({ ...prev, [key]: !prev[key] }))}
@@ -1063,6 +1417,7 @@ export default function AgentHomePage() {
                   ))}
                 </div>
               </div>
+
               <div className="rounded-xl border border-amber-300/30 bg-slate-950/55 p-4">
                 <p className="mb-3 text-lg font-semibold text-slate-100">Travellers and Rooms</p>
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -1080,11 +1435,20 @@ export default function AgentHomePage() {
                   </label>
                 </div>
               </div>
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <button type="button" onClick={() => setCurrentStep(2)}
                   className="rounded-xl border border-slate-600 bg-slate-900/70 px-5 py-3 text-lg font-medium text-slate-200 transition hover:bg-slate-800/80">Back</button>
-                <button type="button" onClick={() => setCurrentStep(4)}
-                  className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110">View Final Route</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStayPreferences((prev) => ({ ...prev, segmentModes }));
+                    setCurrentStep(4);
+                  }}
+                  className="rounded-xl border border-amber-300/35 bg-linear-to-r from-amber-500/85 to-amber-700/85 px-5 py-3 text-lg font-semibold text-slate-950 transition hover:brightness-110"
+                >
+                  Continue to Final Route
+                </button>
               </div>
             </div>
           </MotionSection>
@@ -1097,7 +1461,7 @@ export default function AgentHomePage() {
             className="rounded-2xl border border-slate-700/70 bg-slate-900/75 p-6 shadow-[0_24px_52px_rgba(2,6,23,0.52)] backdrop-blur-md md:p-8">
             <div className="mb-5 flex items-center justify-between gap-3">
               <h2 className="text-3xl font-semibold tracking-tight text-slate-100 md:text-4xl">Final Route</h2>
-              <button type="button" onClick={() => setCurrentStep(3)} className="text-lg font-medium text-amber-300 underline-offset-2 hover:underline">Edit Preferences</button>
+              <button type="button" onClick={() => setCurrentStep(3)} className="text-lg font-medium text-amber-300 underline-offset-2 hover:underline">Edit Journey Setup</button>
             </div>
 
             <div className="grid gap-5 lg:grid-cols-2">
@@ -1143,12 +1507,11 @@ export default function AgentHomePage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Total Distance</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDistanceKm} km</p>
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.totalDistance} km</p>
               </div>
               <div className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4">
                 <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Estimated Time</p>
-                <p className="mt-1 text-2xl font-semibold text-slate-100">{effectiveDurationLabel}</p>
-                {liveRouteMetricsLoading ? <p className="mt-1 text-xs text-slate-500">Updating with latest route...</p> : null}
+                <p className="mt-1 text-2xl font-semibold text-slate-100">{result.estimatedHours} hrs</p>
               </div>
             </div>
 

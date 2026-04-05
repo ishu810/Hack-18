@@ -2,7 +2,7 @@ import { AnimatePresence } from 'framer-motion';
 import { Navigate, Route, Routes, useLocation, Link, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { Clock, LayoutDashboard, Map, CloudSun, Bell, LogOut, User } from 'lucide-react'; // Using Lucide for clean icons
-
+import { useParams } from 'react-router-dom';
 import AgentHomePage from './pages/AgentHomePage';
 import ItineraryPlannerPage from './pages/ItineraryPlannerPage';
 import LoginPage from './pages/LoginPage';
@@ -12,10 +12,10 @@ import WeatherDashboard from './components/WeatherForecast';
 import History from './pages/History';
 import { getCurrentUser } from './api';
 
-// --- Global Header Component ---
 const Header = ({ user, setUser }) => {
   const navigate = useNavigate();
-
+const { id } = useParams();
+const [historyData, setHistoryData] = useState([]);
   if (!user) return null;
 
   const handleLogout = () => {
@@ -27,21 +27,20 @@ const Header = ({ user, setUser }) => {
     <nav className="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-6 py-3 flex justify-between items-center">
       <div className="flex items-center gap-8">
         <Link to="/agent-home" className="text-xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
-          GRIFO-Ops
+          Travel-Guide
         </Link>
         
         <div className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
           <Link to="/agent-home" className="hover:text-white flex items-center gap-2 transition-colors">
             <LayoutDashboard size={18} /> Dashboard
           </Link>
-          <Link to="/itinerary-planner" className="hover:text-white flex items-center gap-2 transition-colors">
+          {/* <Link to="/itinerary-planner" className="hover:text-white flex items-center gap-2 transition-colors">
             <Map size={18} /> Planner
-          </Link>
+          </Link> */}
         </div>
       </div>
 
       <div className="flex items-center gap-5">
-        {/* FIXED: Dynamic Routing using user._id */}
         <Link 
           to={`/history/${user._id || user.id}`} 
           className="p-2 rounded-full hover:bg-slate-800 text-slate-300 hover:text-blue-400 transition-all"
@@ -50,21 +49,21 @@ const Header = ({ user, setUser }) => {
           <Clock size={22} />
         </Link>
 
-        <Link to="/weather-dashboard" className="p-2 rounded-full hover:bg-slate-800 text-slate-300 hover:text-yellow-400 transition-all">
+        {/* <Link to="/weather-dashboard" className="p-2 rounded-full hover:bg-slate-800 text-slate-300 hover:text-yellow-400 transition-all">
           <CloudSun size={22} />
         </Link>
 
         <Link to="/travel-alerts" className="p-2 rounded-full hover:bg-slate-800 text-slate-300 hover:text-red-400 transition-all">
           <Bell size={22} />
-        </Link>
+        </Link> */}
 
         <div className="h-6 w-[1px] bg-slate-800 mx-2" />
 
         <div className="flex items-center gap-3">
-          <div className="flex flex-col items-end hidden sm:block">
-            <span className="text-xs text-slate-200 font-medium">{user.name || 'Agent'}</span>
+          {/* <div className="flex flex-col items-end hidden sm:block">
+            <span className="text-xs text-slate-200 font-medium">{user.username || 'Agent'}</span>
             <span className="text-[10px] text-slate-500">Active Session</span>
-          </div>
+          </div> */}
           <button 
             onClick={handleLogout}
             className="p-2 rounded-full hover:bg-red-950/30 text-slate-400 hover:text-red-400 transition-all"
@@ -76,7 +75,6 @@ const Header = ({ user, setUser }) => {
     </nav>
   );
 };
-// --- Main App Component ---
 export default function App() {
   const location = useLocation();
   const [authLoading, setAuthLoading] = useState(true);
@@ -112,22 +110,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
-      {/* Header is outside Routes so it never re-renders/blinks on navigation */}
       <Header user={user} setUser={setUser} />
 
       <main className="relative">
         <AnimatePresence mode="wait" initial={false}>
           <Routes location={location} key={location.pathname}>
-            {/* Auth Routes */}
             <Route path="/login" element={user ? <Navigate to="/agent-home" replace /> : <LoginPage />} />
             <Route path="/register" element={user ? <Navigate to="/agent-home" replace /> : <RegisterPage />} />
-            
-            {/* Protected Application Routes */}
             <Route path="/agent-home" element={<Protected><AgentHomePage /></Protected>} />
             <Route path="/itinerary-planner" element={<Protected><ItineraryPlannerPage /></Protected>} />
             <Route path="/travel-alerts" element={<Protected><TravelAlerts /></Protected>} />
-            
-            {/* History Route - Make sure the Link in Header matches this pattern */}
             <Route path="/history/:id" element={<Protected><History /></Protected>} />
             
             <Route path="/weather-dashboard" element={<Protected><WeatherDashboard /></Protected>} />

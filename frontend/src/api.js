@@ -82,3 +82,19 @@ export function computeRoute(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+export function getFlightCost(payload) {
+  return apiRequest('/api/travel/flight-cost', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchBudgetEstimate(tripId, payload = {}) {
+  const hasPayload = Boolean(payload && Object.keys(payload).length > 0);
+
+  return apiRequest(`/api/travel/${tripId}/budget`, {
+    method: hasPayload ? 'POST' : 'GET',
+    ...(hasPayload ? { body: JSON.stringify(payload) } : {}),
+  });
+}
