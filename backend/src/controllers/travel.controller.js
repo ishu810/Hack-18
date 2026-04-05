@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { buildItineraryPrompt } from '../utils/itineraryPrompt.js';
 import { computeRoute as computeRouteService } from '../services/routing/routing.service.js';
-import { fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
+import { fetchGoogleVenueRecommendations, fetchGoogleCheckpointSuggestions } from '../services/places/googlePlaces.service.js';
 import axios from 'axios';
 
 const withTimeout = (promise, ms, label = 'operation') => Promise.race([
@@ -1662,61 +1662,67 @@ const createTrip = asyncHandler(async (req, res) => {
   });
 });
 
-// Generate candidate places using Geoapify + LLM selection
+// Generate candidate places using Google Places + LLM selection
 const generatePlaces = asyncHandler(async (req, res) => {
   const { tripId } = req.params;
   console.log('DEBUG generatePlaces called for tripId', tripId);
-  console.log('[Geoapify] runtime key fingerprint:', maskKey(getGeoapifyKey()));
+  console.log('[Google Places] attraction discovery start');
   const trip = await Travel.findById(tripId);
   if (!trip) return res.status(404).json({ success: false, message: 'Trip not found' });
   const days = getTripDaysFromDates(trip.dates);
   const checkpointNames = [...new Set([...(trip.stops || []), trip.destination].map((name) => String(name || '').trim()).filter(Boolean))];
 
-  console.log('[Geoapify] checkpoints for discovery:', checkpointNames);
+  console.log('[Google Places] checkpoints for discovery:', checkpointNames);
 
   const discoveredByCheckpoint = await Promise.all(
     checkpointNames.map(async (checkpointName) => {
       try {
         const center = await geocodeWithGeoapify(checkpointName);
         if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng)) {
-          console.warn(`[Geoapify] geocode unavailable for ${checkpointName}`);
+          console.warn(`[Google Places] geocode unavailable for ${checkpointName}`);
           return [];
         }
 
-        console.log(`[Geoapify] geocode ${checkpointName}:`, {
+        console.log(`[Google Places] geocode ${checkpointName}:`, {
           lat: center.lat,
           lng: center.lng,
           name: center.name,
         });
 
-        const fetchedPlaces = await fetchGeoapifyPlaces({ lat: center.lat, lng: center.lng, radius: 70000 });
+        const googleAttractions = await fetchGoogleCheckpointSuggestions({
+          lat: center.lat,
+          lng: center.lng,
+          city: checkpointName,
+          maxResults: 15,
+        });
 
-        console.log(`[Geoapify] raw places for ${checkpointName}: count=${fetchedPlaces.length}`);
-        if (fetchedPlaces.length) {
-          console.log(`[Geoapify] sample for ${checkpointName}:`, fetchedPlaces.slice(0, 8).map((place) => ({
+        console.log(`[Google Places] raw places for ${checkpointName}: count=${googleAttractions.length}`);
+        if (googleAttractions.length) {
+          console.log(`[Google Places] sample for ${checkpointName}:`, googleAttractions.slice(0, 8).map((place) => ({
             name: place.name,
             lat: place.lat,
             lng: place.lng,
-            popularity: place.popularity,
+            popularity: place.popularity || place.user_ratings_total,
           })));
         }
 
-        return fetchedPlaces
+        return googleAttractions
           // Keep place assignments tight to checkpoint to avoid wrong-city cards.
+          .filter((place) => Number.isFinite(place?.lat) && Number.isFinite(place?.lng))
           .filter((place) => distanceKm({ lat: center.lat, lng: center.lng }, { lat: place.lat, lng: place.lng }) <= 45)
           .map((place) => ({
             name: place.name,
             lat: place.lat,
             lng: place.lng,
             rating: place.rating,
-            popularity: place.popularity,
-            type: place.category || 'attraction',
+            popularity: place.popularity || place.user_ratings_total,
+            type: place.type || 'attraction',
             location: checkpointName,
             best_visit_reason: '',
             imageUrl: ''
           }));
       } catch (error) {
-        console.warn(`Geoapify fetch failed for ${checkpointName}:`, {
+        console.warn(`Google checkpoint fetch failed for ${checkpointName}:`, {
           status: error?.response?.status || null,
           message: error?.message || String(error),
           data: error?.response?.data || null,
@@ -1738,7 +1744,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
     discoveredUnique.push(place);
   });
 
-  console.log('[Geoapify] deduplicated candidate places:', {
+  console.log('[Google Places] deduplicated candidate places:', {
     total: discoveredUnique.length,
     byCheckpoint: checkpointNames.map((name) => ({
       checkpoint: name,
@@ -1749,7 +1755,7 @@ const generatePlaces = asyncHandler(async (req, res) => {
   if (!discoveredUnique.length) {
     return res.status(502).json({
       success: false,
-      message: 'No places were discovered for this route. Check GEOAPIFY_API_KEY and destination input.'
+      message: 'No places were discovered for this route. Check Google Places key and destination input.'
     });
   }
 
