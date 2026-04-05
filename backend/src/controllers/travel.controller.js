@@ -6,6 +6,11 @@ import { computeRoute as computeRouteService } from '../services/routing/routing
 import { fetchGoogleVenueRecommendations } from '../services/places/googlePlaces.service.js';
 import axios from 'axios';
 
+const withTimeout = (promise, ms, label = 'operation') => Promise.race([
+  promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error(`[Timeout] ${label} exceeded ${ms}ms`)), ms)),
+]);
+
 const FALLBACK_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/6/65/No-Image-Placeholder.svg';
 const GEOAPIFY_BASE_URL = 'https://api.geoapify.com';
 
@@ -786,7 +791,7 @@ Output JSON schema:
   }
 ]`;
 
-  const response = await llm.invoke(prompt);
+  const response = await withTimeout(llm.invoke(prompt), 15000, 'LLM place selection');
   const raw = (response.content || response.text || '').toString().trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const parsed = JSON.parse(raw);
 
@@ -1508,6 +1513,58 @@ const ensureInterCityTransitData = async ({ itineraryBundle, origin = '' }) => {
   };
 };
 
+const applySelectedInterCityModes = ({ itineraryBundle, segmentModes = {} }) => {
+  const days = Array.isArray(itineraryBundle?.itinerary) ? itineraryBundle.itinerary : [];
+  if (!days.length) return itineraryBundle;
+
+  const normalizeKey = (value = '') => String(value || '').toLowerCase().split(',')[0].trim();
+  const formatDurationFromMinutes = (value) => {
+    const minutes = Math.round(Number(value) || 0);
+    if (!Number.isFinite(minutes) || minutes <= 0) return '';
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return mins ? `${hours}h ${mins}m` : `${hours}h`;
+  };
+
+  const findSelection = (travel = {}) => {
+    const from = normalizeKey(travel?.from);
+    const to = normalizeKey(travel?.to);
+    if (!from || !to) return null;
+
+    const direct = `${from}|${to}`;
+    const reverse = `${to}|${from}`;
+    if (segmentModes[direct]) return segmentModes[direct];
+    if (segmentModes[reverse]) return segmentModes[reverse];
+
+    const fuzzy = Object.entries(segmentModes).find(([key]) => {
+      const [left, right] = String(key || '').split('|').map(normalizeKey);
+      return left && right && ((left.includes(from) || from.includes(left)) && (right.includes(to) || to.includes(right)));
+    });
+    return fuzzy?.[1] || null;
+  };
+
+  const nextDays = days.map((day) => {
+    if (!day?.travel) return day;
+    const selection = findSelection(day.travel);
+    if (!selection) return day;
+
+    return {
+      ...day,
+      travel: {
+        ...day.travel,
+        mode: String(selection?.mode || day.travel.mode || 'car'),
+        duration: formatDurationFromMinutes(selection?.timeMin) || day.travel.duration || '',
+      },
+    };
+  });
+
+  return {
+    ...itineraryBundle,
+    itinerary: nextDays,
+  };
+};
+
 const createTrip = asyncHandler(async (req, res) => {
   const { origin, destination, stops, budget, dates, stayPreferences } = req.body;
   const userId = req.user?._id || null; 
@@ -1710,33 +1767,36 @@ const generatePlaces = asyncHandler(async (req, res) => {
   });
 
   const placesWithImages = await Promise.all(uniquePlaces.map(async (place) => {
-    let url = isProbablyValidUrl(place.imageUrl) ? place.imageUrl : '';
-    if (url && !(await isReachableImageUrl(url))) {
-      console.warn('Discarding unreachable prefilled image URL for', place.name, url);
-      url = '';
+    const prefilled = isProbablyValidUrl(place.imageUrl) ? place.imageUrl : '';
+    if (prefilled) {
+      const ok = await isReachableImageUrl(prefilled);
+      if (ok) return { ...place, imageUrl: prefilled };
     }
 
     const queryVariants = buildQueryVariants(place.name, place.location, place.type);
-    
-    // Try Unsplash first
-    if (!isProbablyValidUrl(url)) {
-      url = await getUnsplashImage(queryVariants, place.name);
-      if (url && !(await isReachableImageUrl(url))) url = '';
-    }
-    
-    // If Unsplash fails, try Pexels
-    if (!isProbablyValidUrl(url)) {
-      url = await getPexelsImage(queryVariants, place.name);
-      if (url && !(await isReachableImageUrl(url))) url = '';
+
+    const [unsplashResult, pexelsResult, wikimediaResult] = await Promise.allSettled([
+      getUnsplashImage(queryVariants, place.name),
+      getPexelsImage(queryVariants, place.name),
+      getWikimediaImage(place.name),
+    ]);
+
+    const candidates = [unsplashResult, pexelsResult, wikimediaResult]
+      .filter((result) => result.status === 'fulfilled' && isProbablyValidUrl(result.value))
+      .map((result) => result.value);
+
+    if (candidates.length > 0) {
+      const reachabilityChecks = await Promise.allSettled(
+        candidates.map((url) => isReachableImageUrl(url).then((ok) => (ok ? url : null)))
+      );
+      const validUrl = reachabilityChecks
+        .filter((result) => result.status === 'fulfilled' && result.value)
+        .map((result) => result.value)[0] || null;
+
+      if (validUrl) return { ...place, imageUrl: validUrl };
     }
 
-    // Free and strong for popular landmarks if photo stock APIs miss.
-    if (!isProbablyValidUrl(url)) {
-      url = await getWikimediaImage(place.name);
-      if (url && !(await isReachableImageUrl(url))) url = '';
-    }
-
-    return { ...place, imageUrl: isProbablyValidUrl(url) ? url : buildGuaranteedFallbackImage(place) };
+    return { ...place, imageUrl: buildGuaranteedFallbackImage(place) };
   }));
 
   trip.candidatePlaces = placesWithImages;
@@ -1885,7 +1945,7 @@ const generateItinerary = asyncHandler(async (req, res) => {
   let itineraryData;
   try {
     console.log('🔄 Calling LLM...');
-    const response = await llm.invoke(prompt);
+    const response = await withTimeout(llm.invoke(prompt), 20000, 'LLM itinerary generation');
     const content = (response.content || response.text || '{}').toString();
     
     console.log('✅ LLM response received, length:', content.length);
@@ -1909,16 +1969,27 @@ const generateItinerary = asyncHandler(async (req, res) => {
           : (prevDayFirst?.location || trip.origin);
         const isTransferDay = index > 0 && previousCity !== currentCity;
 
-        const activities = (dayPlaces || []).map((place, activityIndex) => ({
+        const activities = (dayPlaces || []).map((place, activityIndex) => {
+          const safePlaceName = String(place?.name || place?.location || currentCity || 'local highlight')
+            .replace(/\b(undefined|null|n\/a|na)\b/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim() || 'local highlight';
+          const fallbackDescription = getGenericPlaceReason(place, { location: place?.location || currentCity }, currentCity);
+          const safeDescription = String(place?.best_visit_reason || '')
+            .replace(/\b(undefined|null)\b/gi, '')
+            .trim() || fallbackDescription;
+
+          return {
           title: isTransferDay && activityIndex === 0
-            ? `After reaching ${currentCity}, visit ${place.name}`
-            : `Visit ${place.name}`,
+            ? `After reaching ${currentCity}, visit ${safePlaceName}`
+            : `Visit ${safePlaceName}`,
           time: activityIndex === 0 ? '9:00 AM - 11:00 AM' : activityIndex === 1 ? '12:00 PM - 2:00 PM' : '3:00 PM - 5:00 PM',
           duration_min: 120,
-          description: place.best_visit_reason || 'Explore attractions',
+          description: safeDescription,
           type: 'outdoor',
           location: place.location || currentCity || 'Main area',
-        }));
+          };
+        });
 
         if (!activities.length) {
           activities.push({
@@ -2014,9 +2085,14 @@ const generateItinerary = asyncHandler(async (req, res) => {
       itineraryBundle: weatherAwareItinerary,
       origin: trip.origin,
     });
-    console.log('✅ Normalized itinerary days:', transitAwareItinerary.itinerary.length);
+    const selectedSegmentModes = asObject(trip?.stayPreferences?.segmentModes) || {};
+    const modeAwareItinerary = applySelectedInterCityModes({
+      itineraryBundle: transitAwareItinerary,
+      segmentModes: selectedSegmentModes,
+    });
+    console.log('✅ Normalized itinerary days:', modeAwareItinerary.itinerary.length);
 
-    trip.itinerary = transitAwareItinerary;
+    trip.itinerary = modeAwareItinerary;
     trip.status = 'itinerary_generated';
     const savedTrip = await trip.save();
     
@@ -2195,34 +2271,124 @@ const estimateBudget = asyncHandler(async (req, res) => {
     };
   };
 
-  const perDay = [];
-  for (let index = 0; index < itineraryDays.length; index += 1) {
-    const day = itineraryDays[index];
-    const hotel = estimateHotelCost(day?.stay?.price_level, day?.stay?.type);
-    const food = estimateFoodCost(trip.budget, days);
-    const activities = estimateActivitiesCost(day?.activities);
-    const transportMode = findTransportForDay(day?.travel);
-    const fallbackTransport = await estimateCabTransitCost(day?.travel);
-    const transport = {
-      cost: Number(transportMode?.cost || fallbackTransport.cost || 0),
-      mode: transportMode?.mode || 'cab',
-      note: transportMode ? 'Selected journey setup transport' : fallbackTransport.note,
-    };
-    const total = Math.round(transport.cost + hotel.mid + food + activities);
-    const dailyBudget = (Number(trip.budget || 0) / Math.max(1, days)) * 1.2;
+  const geoCache = new Map();
+  const selectedPlacePoints = Array.isArray(trip?.selectedPlaces) ? trip.selectedPlaces : [];
 
-    perDay.push({
-      day: Number(day?.day || index + 1),
-      city: day?.city || '',
-      transport,
-      hotel,
-      food,
-      activities,
-      total,
-      withinBudget: total < dailyBudget,
-      recommendations: [],
+  const cleanTransitLabel = (value = '') => String(value || '')
+    .toLowerCase()
+    .replace(/^(visit|explore|discover|tour|walk through|stroll through|shopping at|shopping in|boat ride on|lunch at|dinner at|breakfast at|morning visit to|afternoon visit to|evening visit to)\s+/i, '')
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '')
+    .trim();
+
+  const findSelectedPoint = (label = '') => {
+    const target = cleanTransitLabel(label) || normalizeBudgetKey(label);
+    if (!target) return null;
+
+    const match = selectedPlacePoints.find((place) => {
+      const name = cleanTransitLabel(place?.name) || normalizeBudgetKey(place?.name);
+      const location = cleanTransitLabel(place?.location) || normalizeBudgetKey(place?.location);
+      return (
+        (name && (name === target || name.includes(target) || target.includes(name))) ||
+        (location && (location === target || location.includes(target) || target.includes(location)))
+      );
     });
-  }
+
+    const lat = Number(match?.lat);
+    const lng = Number(match?.lng ?? match?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    return { lat, lng };
+  };
+
+  const resolvePoint = async (label = '') => {
+    const key = normalizeBudgetKey(label);
+    if (!key) return null;
+
+    const selectedPoint = findSelectedPoint(label);
+    if (selectedPoint) return selectedPoint;
+
+    if (geoCache.has(key)) return geoCache.get(key);
+    const point = await geocodeWithGeoapify(label);
+    geoCache.set(key, point || null);
+    return point || null;
+  };
+
+  const estimateIntraDayCabCost = async (day = {}) => {
+    const activities = Array.isArray(day?.activities) ? day.activities : [];
+    if (activities.length < 2) return { cost: 0, distanceKm: 0 };
+
+    const labels = activities
+      .map((activity) => String(activity?.location || cleanTransitLabel(activity?.title) || day?.city || '').trim())
+      .filter(Boolean);
+    if (labels.length < 2) return { cost: 0, distanceKm: 0 };
+
+    const points = await Promise.all(labels.map((label) => resolvePoint(label)));
+
+    let totalKm = 0;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const from = points[index];
+      const to = points[index + 1];
+      if (!from || !to || !Number.isFinite(from.lat) || !Number.isFinite(from.lng) || !Number.isFinite(to.lat) || !Number.isFinite(to.lng)) continue;
+      totalKm += distanceKm(
+        { lat: Number(from.lat), lng: Number(from.lng) },
+        { lat: Number(to.lat), lng: Number(to.lng) },
+      );
+    }
+
+    const roundedKm = Math.max(0, Math.round(totalKm));
+    if (roundedKm <= 0) return { cost: 0, distanceKm: 0 };
+
+    // Intra-day taxi/cab cost mirrors planner road rate calculations.
+    return {
+      cost: Math.round(roundedKm * 13),
+      distanceKm: roundedKm,
+    };
+  };
+
+  const perDay = await Promise.all(
+    itineraryDays.map(async (day, index) => {
+      const [hotel, food, activities, fallbackTransport, intraDay] = await Promise.all([
+        Promise.resolve(estimateHotelCost(day?.stay?.price_level, day?.stay?.type)),
+        Promise.resolve(estimateFoodCost(trip.budget, days)),
+        Promise.resolve(estimateActivitiesCost(day?.activities)),
+        estimateCabTransitCost(day?.travel),
+        estimateIntraDayCabCost(day),
+      ]);
+      const transportMode = findTransportForDay(day?.travel);
+      const hasInterDayLeg = Boolean(day?.travel?.from && day?.travel?.to);
+      const interDayCost = hasInterDayLeg
+        ? Number(transportMode?.cost || fallbackTransport.cost || 0)
+        : 0;
+      const intraDayCost = Number(intraDay?.cost || 0);
+      const totalTransportCost = interDayCost + intraDayCost;
+      const transport = {
+        cost: totalTransportCost,
+        mode: transportMode?.mode || (hasInterDayLeg ? (day?.travel?.mode || 'cab') : 'cab'),
+        interDayCost,
+        intraDayCost,
+        intraDayDistanceKm: Number(intraDay?.distanceKm || 0),
+        note: transportMode
+          ? 'Inter-day uses planner selection + intra-day cab/taxi by distance'
+          : hasInterDayLeg
+            ? `${fallbackTransport.note} + intra-day cab/taxi by distance`
+            : 'Intra-day cab/taxi by calculated distance',
+      };
+      const total = Math.round(transport.cost + hotel.mid + food + activities);
+      const dailyBudget = (Number(trip.budget || 0) / Math.max(1, days)) * 1.2;
+
+      return {
+        day: Number(day?.day || index + 1),
+        city: day?.city || '',
+        transport,
+        hotel,
+        food,
+        activities,
+        total,
+        withinBudget: total < dailyBudget,
+        recommendations: [],
+      };
+    })
+  );
 
   let smartTips = [];
   try {

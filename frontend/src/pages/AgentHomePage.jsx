@@ -465,55 +465,50 @@ export default function AgentHomePage() {
   useEffect(() => {
     if (currentStep !== 3 || routeSegments.length === 0) return;
 
+    const loadingState = {};
     routeSegments.forEach((segment) => {
-      const existing = flightFares[segment.key];
-      if (existing?.loading || existing?.resolved) return;
-
-      setFlightFares((prev) => ({
-        ...prev,
-        [segment.key]: { loading: true, resolved: false, error: false, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
-      }));
-
-      getFlightCost({ from: segment.from, to: segment.to })
-        .then((data) => {
-          const minFare = Number(data?.minFare);
-          if (data?.success && Number.isFinite(minFare) && minFare > 0) {
-            setFlightFares((prev) => ({
-              ...prev,
-              [segment.key]: {
-                loading: false,
-                resolved: true,
-                error: false,
-                noFlights: false,
-                minFare: Math.round(minFare),
-                currency: String(data?.currency || 'INR'),
-                oneWayMinutes: data?.oneWayMinutes != null && Number.isFinite(Number(data.oneWayMinutes)) ? Number(data.oneWayMinutes) : null,
-              },
-            }));
-            return;
-          }
-
-          setFlightFares((prev) => ({
-            ...prev,
-            [segment.key]: {
-              loading: false,
-              resolved: true,
-              error: !Boolean(data?.noFlights),
-              noFlights: Boolean(data?.noFlights),
-              minFare: null,
-              currency: 'INR',
-              oneWayMinutes: null,
-            },
-          }));
-        })
-        .catch(() => {
-          setFlightFares((prev) => ({
-            ...prev,
-            [segment.key]: { loading: false, resolved: true, error: true, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null },
-          }));
-        });
+      loadingState[segment.key] = { loading: true, resolved: false, error: false, noFlights: false, minFare: null, currency: 'INR', oneWayMinutes: null };
     });
-  }, [currentStep, routeSegments, flightFares]);
+    setFlightFares(loadingState);
+
+    let cancelled = false;
+
+    const runFlightFetches = async () => {
+      const results = await Promise.allSettled(
+        routeSegments.map((segment) => getFlightCost({ from: segment.from, to: segment.to })
+          .then((data) => ({ key: segment.key, data }))
+          .catch(() => ({ key: segment.key, data: { minFare: null, fallback: true } })))
+      );
+
+      if (cancelled) return;
+
+      const fareUpdates = {};
+      results.forEach((result) => {
+        if (result.status !== 'fulfilled') return;
+        const { key, data } = result.value || {};
+        if (!key) return;
+
+        const minFare = Number(data?.minFare);
+        fareUpdates[key] = {
+          loading: false,
+          resolved: true,
+          error: !Boolean(data?.success),
+          noFlights: Boolean(data?.fallback) && !Number.isFinite(minFare),
+          minFare: Number.isFinite(minFare) && minFare > 0 ? Math.round(minFare) : null,
+          currency: String(data?.currency || 'INR'),
+          oneWayMinutes: data?.oneWayMinutes != null && Number.isFinite(Number(data.oneWayMinutes)) ? Number(data.oneWayMinutes) : null,
+        };
+      });
+
+      setFlightFares((prev) => ({ ...prev, ...fareUpdates }));
+    };
+
+    runFlightFetches();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentStep, routeSegments]);
 
   const getSegmentSelection = (segmentKey) => {
     const saved = segmentModes?.[segmentKey];

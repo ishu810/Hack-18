@@ -119,6 +119,45 @@ function formatTransit(travel) {
   return `${travel.from} -> ${travel.to}${mode}${duration}`;
 }
 
+function normalizeTransitKey(value = '') {
+  return String(value || '').toLowerCase().split(',')[0].trim();
+}
+
+function findSelectedSegmentMode(segmentModes = {}, travel = {}) {
+  const from = normalizeTransitKey(travel?.from);
+  const to = normalizeTransitKey(travel?.to);
+  if (!from || !to) return null;
+
+  const direct = `${from}|${to}`;
+  const reverse = `${to}|${from}`;
+  if (segmentModes[direct]) return segmentModes[direct];
+  if (segmentModes[reverse]) return segmentModes[reverse];
+
+  const fuzzy = Object.entries(segmentModes).find(([key]) => {
+    const [left, right] = String(key || '').split('|').map(normalizeTransitKey);
+    return left && right && ((left.includes(from) || from.includes(left)) && (right.includes(to) || to.includes(right)));
+  });
+  return fuzzy?.[1] || null;
+}
+
+function getModeAwareTravel(travel, segmentModes = {}) {
+  if (!travel) return null;
+  const selected = findSelectedSegmentMode(segmentModes, travel);
+  if (!selected) return travel;
+
+  const mins = Math.round(Number(selected?.timeMin) || 0);
+  const duration = mins > 0
+    ? (mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60 ? `${mins % 60}m` : ''}`.trim())
+    : travel.duration;
+
+  return {
+    ...travel,
+    mode: String(selected?.mode || travel.mode || ''),
+    duration: duration || travel.duration || '',
+    selectedCost: Number(selected?.cost || 0),
+  };
+}
+
 function formatCurrency(value) {
   const amount = Number(value || 0);
   return new Intl.NumberFormat('en-IN', {
@@ -146,6 +185,12 @@ function getSegmentTransitLabel(segment) {
   return `${timeLabel} • ${distanceLabel}`;
 }
 
+function estimateCabCostFromDistance(distanceKm = 0) {
+  const km = Number(distanceKm || 0);
+  if (!Number.isFinite(km) || km <= 0) return 0;
+  return Math.max(90, Math.round(60 + (km * 18)));
+}
+
 function formatMetric(value, suffix = '') {
   if (value === null || value === undefined || value === '') return 'N/A';
   const num = Number(value);
@@ -162,20 +207,43 @@ function sanitizeActivityTitle(value = '') {
     .trim();
 }
 
+function stripInvalidTokens(value = '') {
+  return String(value || '')
+    .replace(/\b(undefined|null|n\/a|na)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isGenericPlaceLabel(label = '', city = '') {
+  const cleanLabel = normalizeName(stripInvalidTokens(label));
+  const cleanCity = normalizeName(stripInvalidTokens(city));
+  if (!cleanLabel) return true;
+  if (['local highlight', 'main area', 'city center', 'city'].includes(cleanLabel)) return true;
+  if (cleanCity && (cleanLabel === cleanCity || cleanLabel.includes(cleanCity) || cleanCity.includes(cleanLabel))) return true;
+  return false;
+}
+
 function getReadableActivityTitle(activity = {}) {
   const raw = sanitizeActivityTitle(activity?.title || '');
   if (!raw) return 'Visit local highlight';
 
+  const fallbackPlace = stripInvalidTokens(activity?.location || '');
+
   const transferMatch = raw.match(/^after\s+reaching\s+([^,]+),\s*(.*)$/i);
   const normalizeVisit = (text = '') => {
-    const core = String(text || '')
+    const core = stripInvalidTokens(String(text || '')
       .replace(/^\s*(visit|explore|discover|tour|walk\s+through|stroll\s+through|shopping\s+at|shopping\s+in|boat\s+ride\s+on|lunch\s+at|dinner\s+at|breakfast\s+at|morning\s+visit\s+to|afternoon\s+visit\s+to|evening\s+visit\s+to)\s+/i, '')
-      .trim();
+      .trim());
+    if (!core && fallbackPlace) return `Visit ${fallbackPlace}`;
     return core ? `Visit ${core}` : 'Visit local highlight';
   };
 
   if (transferMatch) {
-    const city = String(transferMatch[1] || '').trim();
+    const city = stripInvalidTokens(transferMatch[1] || 'the city');
     const rest = String(transferMatch[2] || '').trim();
     return `After reaching ${city}, ${normalizeVisit(rest)}`;
   }
@@ -195,7 +263,55 @@ function getReadableActivityDescription(activity = {}) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  if (/\b(undefined|null)\b/i.test(cleaned)) {
+    const title = getReadableActivityTitle(activity).replace(/^After reaching\s+[^,]+,\s*/i, '');
+    const core = stripInvalidTokens(title.replace(/^Visit\s+/i, '')) || 'This stop';
+    const city = stripInvalidTokens(activity?.location || '');
+    return `${core} is a well-known highlight${city ? ` in ${city}` : ''}, popular for local character, memorable views, and cultural value.`;
+  }
+
   return cleaned;
+}
+
+function getActivityDisplayTitle(activity = {}, day = {}, stopName = '') {
+  const base = getReadableActivityTitle(activity);
+  const cleanStop = stripInvalidTokens(stopName);
+  const city = stripInvalidTokens(day?.city || activity?.location || '');
+
+  if (!cleanStop) return base;
+
+  const transferMatch = base.match(/^After reaching\s+([^,]+),\s*Visit\s+(.+)$/i);
+  if (transferMatch) {
+    const target = stripInvalidTokens(transferMatch[2]);
+    if (isGenericPlaceLabel(target, city)) {
+      return `After reaching ${stripInvalidTokens(transferMatch[1]) || city || 'the city'}, Visit ${cleanStop}`;
+    }
+    return base;
+  }
+
+  const visitMatch = base.match(/^Visit\s+(.+)$/i);
+  if (visitMatch) {
+    const target = stripInvalidTokens(visitMatch[1]);
+    if (isGenericPlaceLabel(target, city)) {
+      return `Visit ${cleanStop}`;
+    }
+  }
+
+  return base;
+}
+
+function getActivityDisplayDescription(activity = {}, day = {}, stopName = '') {
+  const base = getReadableActivityDescription(activity);
+  const cleanStop = stripInvalidTokens(stopName);
+  const city = stripInvalidTokens(day?.city || activity?.location || '');
+  if (!base || !cleanStop || !city) return base;
+
+  const cityRegex = new RegExp(`^${escapeRegExp(city)}\\b`, 'i');
+  if (cityRegex.test(base) && /well-known highlight in/i.test(base)) {
+    return base.replace(cityRegex, cleanStop);
+  }
+
+  return base;
 }
 
 function getVenueFallbackImage(item, mode) {
@@ -246,6 +362,7 @@ export default function ItineraryPlannerPage() {
   const [resolvedRoutePlaces, setResolvedRoutePlaces] = useState([]);
   const [resolvedDayActivityPlaces, setResolvedDayActivityPlaces] = useState([]);
   const [routeSegments, setRouteSegments] = useState([]);
+  const [dayRouteSummaries, setDayRouteSummaries] = useState({});
   const [selectedRouteSegmentIndex, setSelectedRouteSegmentIndex] = useState(null);
   const [selectedRouteSegment, setSelectedRouteSegment] = useState(null);
   const [routeRefreshToken, setRouteRefreshToken] = useState(0);
@@ -261,6 +378,7 @@ export default function ItineraryPlannerPage() {
   const lastRemovedRef = useRef(null);
   const attemptedCoordinateResolutionRef = useRef(new Set());
   const dayActivityGeoCacheRef = useRef(new Map());
+  const parallelFetchDone = useRef(false);
 
   const showToast = (nextToast) => {
     setToast(nextToast);
@@ -370,7 +488,10 @@ export default function ItineraryPlannerPage() {
     const topActivity = Array.isArray(day?.activities) ? day.activities[0] : null;
     if (topActivity?.title) {
       const place = String(topActivity.location || day?.city || '').trim();
-      pushUnique(`Nearby sightseeing highlight: ${topActivity.title}${place ? ` around ${place}` : ''}.`);
+      const title = getReadableActivityTitle(topActivity);
+      if (!/\bundefined\b/i.test(title)) {
+        pushUnique(`Nearby sightseeing highlight: ${title}${place ? ` around ${place}` : ''}.`);
+      }
     }
 
     (day?.local_explorations || []).slice(0, 2).forEach((item) => {
@@ -401,8 +522,55 @@ export default function ItineraryPlannerPage() {
 
   const activeDay = days[activeDayIndex] || null;
   const advisoryDay = openAdvisoryDayIndex === null ? null : days[openAdvisoryDayIndex] || null;
-  const budgetSegmentModes = journey?.stayPreferences?.segmentModes || journey?.segmentModes || {};
-  const budgetSegmentModesKey = useMemo(() => JSON.stringify(budgetSegmentModes || {}), [budgetSegmentModes]);
+
+  const resolveDayRoutePlaces = async (day) => {
+    const activities = Array.isArray(day?.activities) ? day.activities : [];
+    if (activities.length < 2) return [];
+
+    const resolved = [];
+    const used = new Set();
+
+    for (const activity of activities) {
+      const picked = pickPlaceForActivity(activity, selectedPlaces, day?.city || '', used);
+      if (picked?.place) {
+        used.add(picked.index);
+        resolved.push(picked.place);
+        continue;
+      }
+
+      const title = getReadableActivityTitle(activity);
+      const location = String(activity?.location || '').trim();
+      const query = [location, day?.city, title].filter(Boolean).join(', ');
+      if (!query) continue;
+
+      const cacheKey = query.toLowerCase().trim();
+      const cached = dayActivityGeoCacheRef.current.get(cacheKey);
+      if (cached) {
+        resolved.push({
+          name: title,
+          location: location || day?.city || '',
+          lat: cached.lat,
+          lng: cached.lng,
+        });
+        continue;
+      }
+
+      const geo = await geocodePlace(query);
+      if (!geo || !Number.isFinite(geo.lat) || !Number.isFinite(geo.lng)) continue;
+
+      dayActivityGeoCacheRef.current.set(cacheKey, { lat: Number(geo.lat), lng: Number(geo.lng) });
+      resolved.push({
+        name: title,
+        location: location || day?.city || '',
+        lat: Number(geo.lat),
+        lng: Number(geo.lng),
+      });
+    }
+
+    return optimizeDayPlaces(
+      resolved.filter((place) => Number.isFinite(Number(place?.lat)) && Number.isFinite(Number(place?.lng ?? place?.lon)))
+    );
+  };
 
   const budgetByDay = useMemo(() => {
     const entries = Array.isArray(budgetData?.perDay) ? budgetData.perDay : [];
@@ -415,46 +583,160 @@ export default function ItineraryPlannerPage() {
     }, new Map());
   }, [budgetData]);
 
-  const totalBudgetAmount = Number(budgetData?.totalBudget || journey?.budget || 0);
-  const estimatedBudgetAmount = Number(budgetData?.totalEstimated || 0);
-
   useEffect(() => {
-    if (!tripId) {
-      setBudgetData(null);
-      setBudgetError('');
-      setBudgetLoading(false);
-      return;
-    }
-
     let cancelled = false;
 
-    const loadBudget = async () => {
-      setBudgetLoading(true);
-      setBudgetError('');
-
-      try {
-        const parsedSegmentModes = budgetSegmentModesKey && budgetSegmentModesKey !== '{}' ? JSON.parse(budgetSegmentModesKey) : {};
-        const payload = Object.keys(parsedSegmentModes || {}).length ? { segmentModes: parsedSegmentModes } : {};
-        const response = await fetchBudgetEstimate(tripId, payload);
-        if (cancelled) return;
-        setBudgetData(response || null);
-      } catch (error) {
-        if (cancelled) return;
-        setBudgetData(null);
-        setBudgetError(error?.message || 'Budget estimate unavailable.');
-      } finally {
-        if (!cancelled) {
-          setBudgetLoading(false);
-        }
+    const resolveAllDayRouteSummaries = async () => {
+      const itineraryDays = Array.isArray(days) ? days : [];
+      if (!itineraryDays.length) {
+        setDayRouteSummaries({});
+        return;
       }
+
+      const entries = await Promise.all(itineraryDays.map(async (day) => {
+        const dayNumber = Number(day?.day || 0);
+        if (dayNumber <= 0) return null;
+
+        const routePoints = await resolveDayRoutePlaces(day);
+        if (routePoints.length < 2) {
+          return [dayNumber, { stops: routePoints, segments: [], totalCabCost: 0 }];
+        }
+
+        const nextSegments = await Promise.all(routePoints.slice(0, -1).map(async (from, index) => {
+          const to = routePoints[index + 1];
+          const response = await computeRoute({
+            waypoints: [
+              { lat: Number(from.lat), lng: Number(from.lng ?? from.lon) },
+              { lat: Number(to.lat), lng: Number(to.lng ?? to.lon) },
+            ],
+            mode: 'drive',
+            options: {},
+          });
+
+          const metrics = buildRouteMetrics(response?.route || {}, 'drive', {});
+          const cabCost = estimateCabCostFromDistance(metrics.distanceKm);
+          return {
+            index,
+            fromName: from?.name || `Stop ${index + 1}`,
+            toName: to?.name || `Stop ${index + 2}`,
+            points: metrics.polyline.length > 1
+              ? metrics.polyline
+              : [
+                  [Number(from.lat), Number(from.lng ?? from.lon)],
+                  [Number(to.lat), Number(to.lng ?? to.lon)],
+                ],
+            distanceMeters: metrics.distanceMeters,
+            distanceKm: metrics.distanceKm,
+            estimatedMinutes: metrics.estimatedMinutes,
+            durationMinutes: metrics.durationMinutes,
+            averageSpeedKmh: metrics.averageSpeedKmh,
+            cabCost,
+          };
+        }));
+
+        const totalCabCost = nextSegments.reduce((sum, segment) => sum + Number(segment?.cabCost || 0), 0);
+        return [dayNumber, { stops: routePoints, segments: nextSegments, totalCabCost }];
+      }));
+
+      if (cancelled) return;
+
+      const nextSummaries = {};
+      entries.filter(Boolean).forEach(([dayNumber, summary]) => {
+        nextSummaries[dayNumber] = summary;
+      });
+      setDayRouteSummaries(nextSummaries);
     };
 
-    loadBudget();
+    resolveAllDayRouteSummaries();
 
     return () => {
       cancelled = true;
     };
-  }, [budgetSegmentModesKey, tripId]);
+  }, [days, routeRefreshToken, selectedPlaces]);
+
+  const displayBudgetData = useMemo(() => {
+    if (!budgetData?.perDay) return budgetData;
+
+    const perDay = budgetData.perDay.map((entry, index) => {
+      const hotel = Number(entry?.hotel?.mid || 0);
+      const food = Number(entry?.food || 0);
+      const activities = Number(entry?.activities || 0);
+      const interDay = Number(entry?.transport?.interDayCost || entry?.transport?.cost || 0);
+      const dayNumber = Number(entry?.day || index + 1);
+      const summaryIntraDay = Number(dayRouteSummaries?.[dayNumber]?.totalCabCost || 0);
+      const intraDay = Number(entry?.transport?.intraDayCost || 0) > 0
+        ? Number(entry?.transport?.intraDayCost || 0)
+        : summaryIntraDay;
+      const transportCost = interDay + intraDay;
+      const total = Math.round(hotel + food + activities + transportCost);
+
+      return {
+        ...entry,
+        transport: {
+          ...entry.transport,
+          interDayCost: interDay,
+          intraDayCost: intraDay,
+          cost: transportCost,
+        },
+        total,
+        withinBudget: total <= Number(budgetData?.totalBudget || journey?.budget || 0),
+      };
+    });
+
+    const totalEstimated = perDay.reduce((sum, day) => sum + Number(day?.total || 0), 0);
+    return {
+      ...budgetData,
+      perDay,
+      totalEstimated,
+    };
+  }, [budgetData, dayRouteSummaries, journey?.budget]);
+
+  const totalBudgetAmount = Number(budgetData?.totalBudget || journey?.budget || 0);
+  const estimatedBudgetAmount = Number(displayBudgetData?.totalEstimated || 0);
+
+  useEffect(() => {
+    parallelFetchDone.current = false;
+    setBudgetData(null);
+    setBudgetError('');
+    setBudgetLoading(false);
+  }, [tripId]);
+
+  useEffect(() => {
+    if (!tripId || !itineraryBundle || parallelFetchDone.current) return;
+    parallelFetchDone.current = true;
+
+    let cancelled = false;
+
+    const runParallelFetches = async () => {
+      setBudgetLoading(true);
+      setBudgetError('');
+
+      const segmentModes = journey?.stayPreferences?.segmentModes || {};
+      const budgetPayload = Object.keys(segmentModes || {}).length ? { segmentModes } : {};
+
+      await Promise.allSettled([
+        fetchBudgetEstimate(tripId, budgetPayload)
+          .then((data) => {
+            if (!cancelled && data?.success) {
+              setBudgetData(data);
+            }
+          })
+          .catch(() => {}),
+        Promise.resolve(),
+      ]);
+
+      if (!cancelled) {
+        setBudgetLoading(false);
+        console.log('[Itinerary] parallel post-load fetches complete');
+      }
+    };
+
+    runParallelFetches();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tripId, itineraryBundle, journey]);
 
   useEffect(() => {
     if (openAdvisoryDayIndex === null) return;
@@ -1015,7 +1297,7 @@ export default function ItineraryPlannerPage() {
             </div>
 
             <BudgetBreakdown
-              budgetData={budgetData}
+              budgetData={displayBudgetData}
               loading={budgetLoading}
               error={budgetError}
               totalBudget={totalBudgetAmount}
@@ -1028,6 +1310,18 @@ export default function ItineraryPlannerPage() {
 
             <div className="mt-4 space-y-5">
               {days.map((day, index) => (
+                (() => {
+                  const modeAwareTravel = getModeAwareTravel(day.travel, journey?.stayPreferences?.segmentModes || {});
+                  const dayNumber = Number(day.day || index + 1);
+                  const dayRouteSummary = dayRouteSummaries?.[dayNumber] || null;
+                  const dayRouteStops = dayRouteSummary?.stops || [];
+                  const dayRouteSegments = dayRouteSummary?.segments || (index === activeDayIndex ? routeSegments : []);
+                  const budgetEntry = budgetByDay.get(dayNumber) || null;
+                  const budgetIntraDay = Number(budgetEntry?.transport?.intraDayCost || 0);
+                  const visibleIntraDay = budgetIntraDay > 0
+                    ? budgetIntraDay
+                    : Number(dayRouteSummary?.totalCabCost || 0);
+                  return (
                 <article
                   key={`${day.day || index + 1}-${day.city || 'city'}`}
                   onClick={() => setActiveDayIndex(index)}
@@ -1040,11 +1334,16 @@ export default function ItineraryPlannerPage() {
 
                   <div className="mt-4">
                     <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">Transit</p>
-                    {formatTransit(day.travel) ? (
-                      <>
-                        <p className="mt-1 text-base font-semibold text-amber-100">{formatTransit(day.travel)}</p>
-                        {day.travel?.note ? <p className="mt-1 text-sm text-amber-100/90">{day.travel.note}</p> : null}
-                      </>
+                    {formatTransit(modeAwareTravel) ? (
+                      <div className="rounded-xl border border-slate-700 bg-slate-950/60 px-3 py-3">
+                        <div>
+                        <p className="mt-1 text-base font-semibold text-amber-100">{formatTransit(modeAwareTravel)}</p>
+                        {modeAwareTravel?.selectedCost ? (
+                          <p className="mt-1 text-sm text-amber-100/90">Planner-selected inter-city fare: {formatCurrency(modeAwareTravel.selectedCost)}</p>
+                        ) : null}
+                        {modeAwareTravel?.note ? <p className="mt-1 text-sm text-amber-100/90">{modeAwareTravel.note}</p> : null}
+                        </div>
+                      </div>
                     ) : (
                       <p className="mt-1 text-sm text-slate-300">No inter-city transfer planned for this day.</p>
                     )}
@@ -1072,34 +1371,38 @@ export default function ItineraryPlannerPage() {
                       <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-400">
                         Budget strip loading...
                       </div>
-                    ) : budgetByDay.get(Number(day.day || index + 1)) ? (
+                    ) : (budgetEntry || dayRouteSummary) ? (
                       <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-500/8 px-4 py-3">
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">Budget Strip</p>
-                          <span className={`text-xs font-semibold uppercase tracking-[0.12em] ${budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'text-emerald-200' : 'text-rose-200'}`}>
-                            {budgetByDay.get(Number(day.day || index + 1))?.withinBudget ? 'Within plan' : 'Over plan'}
+                          <span className={`text-xs font-semibold uppercase tracking-[0.12em] ${budgetEntry?.withinBudget ? 'text-emerald-200' : 'text-rose-200'}`}>
+                            {budgetEntry?.withinBudget ? 'Within plan' : 'Over plan'}
                           </span>
                         </div>
-                        <div className="mt-3 grid gap-2 text-xs text-slate-200 sm:grid-cols-2 lg:grid-cols-5">
+                        <div className="mt-3 grid gap-2 text-xs text-slate-200 sm:grid-cols-2 lg:grid-cols-6">
                           <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
                             <p className="uppercase tracking-[0.12em] text-slate-500">Hotel</p>
-                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.hotel?.mid || 0)}</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetEntry?.hotel?.mid || 0)}</p>
                           </div>
                           <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
                             <p className="uppercase tracking-[0.12em] text-slate-500">Food</p>
-                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.food || 0)}</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetEntry?.food || 0)}</p>
                           </div>
                           <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
                             <p className="uppercase tracking-[0.12em] text-slate-500">Activities</p>
-                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.activities || 0)}</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetEntry?.activities || 0)}</p>
                           </div>
                           <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
-                            <p className="uppercase tracking-[0.12em] text-slate-500">Transport</p>
-                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.transport?.cost || 0)}</p>
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Inter-day</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(budgetEntry?.transport?.interDayCost || budgetEntry?.transport?.cost || 0)}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2">
+                            <p className="uppercase tracking-[0.12em] text-slate-500">Intra-day</p>
+                            <p className="mt-1 font-semibold text-slate-100">{formatCurrency(visibleIntraDay)}</p>
                           </div>
                           <div className="rounded-lg border border-amber-300/25 bg-amber-500/10 px-3 py-2">
-                            <p className="uppercase tracking-[0.12em] text-amber-200">Total</p>
-                            <p className="mt-1 font-semibold text-amber-50">{formatCurrency(budgetByDay.get(Number(day.day || index + 1))?.total || 0)}</p>
+                            <p className="uppercase tracking-[0.12em] text-amber-200">Day total</p>
+                            <p className="mt-1 font-semibold text-amber-50">{formatCurrency(budgetEntry?.total || 0)}</p>
                           </div>
                         </div>
                       </div>
@@ -1115,8 +1418,14 @@ export default function ItineraryPlannerPage() {
                       <ol className="mt-3 space-y-3">
                         {(day.activities || []).map((activity, activityIndex) => (
                           <li key={`${day.day}-${activityIndex}`} className="pl-1">
+                            {(() => {
+                              const stopName = dayRouteStops?.[activityIndex]?.name || '';
+                              const displayTitle = getActivityDisplayTitle(activity, day, stopName);
+                              const displayDescription = getActivityDisplayDescription(activity, day, stopName);
+                              return (
+                                <>
                             <div className="flex items-start justify-between gap-3">
-                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {getReadableActivityTitle(activity)}</p>
+                              <p className="text-sm font-semibold text-slate-100">{activity.time || 'Flexible time'} • {displayTitle}</p>
                               <button
                                 type="button"
                                 onClick={(event) => {
@@ -1129,14 +1438,27 @@ export default function ItineraryPlannerPage() {
                                 Remove
                               </button>
                             </div>
-                            {activity.description ? <p className="mt-1 text-sm text-slate-300">{getReadableActivityDescription(activity)}</p> : null}
+                            {displayDescription ? <p className="mt-1 text-sm text-slate-300">{displayDescription}</p> : null}
 
-                            {index === activeDayIndex && activityIndex < (day.activities || []).length - 1 ? (
+                            {activityIndex < (day.activities || []).length - 1 ? (
                               <div className="mt-2 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-2 py-1.5 text-[11px] text-cyan-100">
-                                <span className="font-semibold uppercase tracking-[0.12em]">Transit to next stop</span>
-                                <p className="mt-1">{getSegmentTransitLabel(routeSegments[activityIndex])}</p>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <span className="font-semibold uppercase tracking-[0.12em]">Transit to next stop</span>
+                                    <p className="mt-1">{getSegmentTransitLabel(dayRouteSegments[activityIndex])}</p>
+                                  </div>
+                                  {dayRouteSegments[activityIndex] ? (
+                                    <div className="shrink-0 rounded border border-amber-300/30 bg-amber-500/10 px-2 py-1 text-right text-amber-100">
+                                      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-200">Cab</p>
+                                      <p className="mt-0.5 text-[11px] font-semibold">{formatCurrency(dayRouteSegments[activityIndex]?.cabCost || estimateCabCostFromDistance(dayRouteSegments[activityIndex]?.distanceKm))}</p>
+                                    </div>
+                                  ) : null}
+                                </div>
                               </div>
                             ) : null}
+                                </>
+                              );
+                            })()}
                           </li>
                         ))}
                       </ol>
@@ -1184,6 +1506,8 @@ export default function ItineraryPlannerPage() {
                     </button>
                   </div>
                 </article>
+                  );
+                })()
               ))}
             </div>
           </section>
