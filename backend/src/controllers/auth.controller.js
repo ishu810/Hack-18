@@ -80,7 +80,6 @@ const googleLogin = async (req, res) => {
       return res.status(400).json({ message: "idToken is required" });
     }
 
-
     const ticket = await googleClient.verifyIdToken({
       idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
