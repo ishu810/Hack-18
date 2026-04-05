@@ -42,6 +42,12 @@ export function registerUser(payload) {
   });
 }
 
+export function getCurrentUser() {
+  return apiRequest('/api/auth/me', {
+    method: 'GET',
+  });
+}
+
 export function logoutUser() {
   return apiRequest('/api/user/logout', {
     method: 'POST',
@@ -102,4 +108,8 @@ export async function fetchBudgetEstimate(tripId, payload = {}) {
     method: hasPayload ? 'POST' : 'GET',
     ...(hasPayload ? { body: JSON.stringify(payload) } : {}),
   });
+}
+
+export function getTravelHistory(userId) {
+  return apiRequest(`/api/${userId}`);
 }
